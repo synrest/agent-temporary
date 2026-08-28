@@ -1,0 +1,109 @@
+#!/bin/sh
+set -eu
+
+PREFIX=${PREFIX:-/usr/local/bin}
+TARGET=${PREFIX}/agent-temporary
+RULE=${AGENT_TEMPORARY_RULE:-/etc/sudoers.d/90-temporary-agent}
+CONFIG=${AGENT_TEMPORARY_CONFIG:-/etc/agent-temporary.conf}
+
+usage() {
+    echo "Usage: sudo $0 {install|on|off|status}" >&2
+    exit 2
+}
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] || {
+        echo "Run as root: sudo $0 $*" >&2
+        exit 1
+    }
+}
+
+visudo_path() {
+    command -v visudo || {
+        echo "visudo is required but was not found" >&2
+        exit 1
+    }
+}
+
+validate_sudoers() {
+    "$(visudo_path)" -cf /etc/sudoers >/dev/null
+}
+
+load_user() {
+    [ -r "$CONFIG" ] || {
+        echo "Not installed: $CONFIG is missing" >&2
+        exit 1
+    }
+    # The config is root-owned and created by this script.
+    . "$CONFIG"
+    [ -n "${AGENT_USER:-}" ] || {
+        echo "Invalid config: AGENT_USER is missing" >&2
+        exit 1
+    }
+}
+
+case "${1:-status}" in
+    install)
+        need_root install
+        target_user=${AGENT_USER:-${SUDO_USER:-}}
+        [ -n "$target_user" ] || {
+            echo "Set AGENT_USER or run through sudo from the target user" >&2
+            exit 1
+        }
+        id "$target_user" >/dev/null 2>&1 || {
+            echo "Unknown user: $target_user" >&2
+            exit 1
+        }
+
+        stamp=$(date +%Y%m%d-%H%M%S)
+        backup=/var/lib/agent-temporary/backups/$stamp
+        install -d -m 700 "$backup"
+        for file in "$RULE" "$TARGET" "$CONFIG"; do
+            [ -e "$file" ] && cp -p "$file" "$backup/$(basename "$file")"
+        done
+
+        install -d -m 755 "$PREFIX"
+        install -o root -g "$(id -gn root)" -m 755 "$0" "$TARGET"
+        tmp=$(mktemp "${CONFIG}.XXXXXX")
+        trap 'rm -f "$tmp"' EXIT HUP INT TERM
+        printf 'AGENT_USER=%s\n' "$target_user" > "$tmp"
+        chmod 600 "$tmp"
+        chown root:"$(id -gn root)" "$tmp"
+        mv -f "$tmp" "$CONFIG"
+        rm -f "$RULE"
+        validate_sudoers
+        trap - EXIT HUP INT TERM
+        echo "Installed $TARGET for user $target_user"
+        echo "Temporary access is disabled. Backup: $backup"
+        ;;
+    status)
+        if [ -e "$RULE" ]; then
+            echo "Temporary agent sudo access is enabled."
+        else
+            echo "Temporary agent sudo access is disabled."
+        fi
+        ;;
+    on)
+        need_root on
+        load_user
+        tmp=$(mktemp "${RULE}.XXXXXX")
+        trap 'rm -f "$tmp"' EXIT HUP INT TERM
+        printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$AGENT_USER" > "$tmp"
+        chmod 440 "$tmp"
+        chown root:"$(id -gn root)" "$tmp"
+        "$(visudo_path)" -cf "$tmp" >/dev/null
+        mv -f "$tmp" "$RULE"
+        trap - EXIT HUP INT TERM
+        validate_sudoers
+        echo "Temporary agent sudo access enabled for $AGENT_USER."
+        ;;
+    off)
+        need_root off
+        rm -f "$RULE"
+        validate_sudoers
+        echo "Temporary agent sudo access disabled."
+        ;;
+    *)
+        usage
+        ;;
+esac

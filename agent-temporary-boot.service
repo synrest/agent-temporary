@@ -1,0 +1,11 @@
+[Unit]
+Description=Revoke agent-temporary privilege after boot
+After=local-fs.target
+Before=sshd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/agent-temporary --internal-boot-revoke
+
+[Install]
+WantedBy=multi-user.target

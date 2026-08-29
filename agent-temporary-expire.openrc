@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+
+name="agent-temporary-expire"
+command="/usr/local/bin/agent-temporary"
+command_args="--internal-expire-loop"
+command_background=true
+pidfile="/run/agent-temporary-expire.pid"
+
+depend() {
+    need localmount
+    after bootmisc
+}

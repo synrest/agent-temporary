@@ -1,0 +1,10 @@
+#!/sbin/openrc-run
+
+name="agent-temporary-boot"
+command="/usr/local/bin/agent-temporary"
+command_args="--internal-boot-revoke"
+
+depend() {
+    need localmount
+    after bootmisc
+}

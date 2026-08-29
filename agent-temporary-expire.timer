@@ -1,0 +1,11 @@
+[Unit]
+Description=Local expiry check for agent-temporary privilege
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=1s
+Unit=agent-temporary-expire.service
+
+[Install]
+WantedBy=timers.target

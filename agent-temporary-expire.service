@@ -1,0 +1,6 @@
+[Unit]
+Description=Expire agent-temporary privilege when its local TTL ends
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/agent-temporary --internal-expire

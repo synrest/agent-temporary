@@ -1,109 +1,227 @@
 #!/bin/sh
 set -eu
 
+VERSION=0.3.0
+DEFAULT_TTL=5m
 PREFIX=${PREFIX:-/usr/local/bin}
-TARGET=${PREFIX}/agent-temporary
+TARGET=${TARGET:-$PREFIX/agent-temporary}
 RULE=${AGENT_TEMPORARY_RULE:-/etc/sudoers.d/90-temporary-agent}
 CONFIG=${AGENT_TEMPORARY_CONFIG:-/etc/agent-temporary.conf}
+STATE_DIR=${AGENT_TEMPORARY_STATE_DIR:-/var/lib/agent-temporary}
+STATE=${AGENT_TEMPORARY_STATE:-$STATE_DIR/state}
+SYSTEMD_DIR=${AGENT_TEMPORARY_SYSTEMD_DIR:-/etc/systemd/system}
+SYSTEMCTL=${SYSTEMCTL:-systemctl}
+OPENRC_DIR=${AGENT_TEMPORARY_OPENRC_DIR:-/etc/init.d}
+RCSERVICE=${RCSERVICE:-}
+RCUPDATE=${RCUPDATE:-}
+OPENRC_PIDFILE=${AGENT_TEMPORARY_OPENRC_PIDFILE:-/run/agent-temporary-expire.pid}
+VISUDO=${VISUDO:-visudo}
+SUDOERS=${AGENT_TEMPORARY_SUDOERS:-/etc/sudoers}
+EXPIRY_TIMER=agent-temporary-expire.timer
+SOURCE_DIR=${AGENT_TEMPORARY_RELEASE_DIR:-.}
 
-usage() {
-    echo "Usage: sudo $0 {install|on|off|status}" >&2
-    exit 2
-}
-
-need_root() {
-    [ "$(id -u)" -eq 0 ] || {
-        echo "Run as root: sudo $0 $*" >&2
-        exit 1
-    }
-}
-
-visudo_path() {
-    command -v visudo || {
-        echo "visudo is required but was not found" >&2
-        exit 1
-    }
-}
-
-validate_sudoers() {
-    "$(visudo_path)" -cf /etc/sudoers >/dev/null
-}
+usage() { echo "Usage: sudo $0 {install|on --ttl DURATION|off|status|version}" >&2; exit 2; }
+need_root() { [ "$(id -u)" -eq 0 ] || { echo "Run as root: sudo $0 $*" >&2; exit 1; }; }
+die() { echo "agent-temporary: $*" >&2; exit 1; }
+version() { echo "agent-temporary $VERSION"; }
 
 load_user() {
-    [ -r "$CONFIG" ] || {
-        echo "Not installed: $CONFIG is missing" >&2
-        exit 1
-    }
-    # The config is root-owned and created by this script.
+    [ -r "$CONFIG" ] || die "not installed: $CONFIG is missing"
     . "$CONFIG"
-    [ -n "${AGENT_USER:-}" ] || {
-        echo "Invalid config: AGENT_USER is missing" >&2
-        exit 1
-    }
+    [ -n "${AGENT_USER:-}" ] || die "invalid config: AGENT_USER is missing"
+    id "$AGENT_USER" >/dev/null 2>&1 || die "unknown configured user: $AGENT_USER"
+}
+
+validate_platform() {
+    command -v "$VISUDO" >/dev/null 2>&1 || die "visudo is required"
+    if command -v "$SYSTEMCTL" >/dev/null 2>&1; then
+        INIT_SYSTEM=systemd
+    else
+        [ -n "$RCSERVICE" ] || for candidate in /sbin/rc-service /usr/sbin/rc-service; do [ -x "$candidate" ] && { RCSERVICE=$candidate; break; }; done
+        [ -n "$RCUPDATE" ] || for candidate in /sbin/rc-update /usr/sbin/rc-update; do [ -x "$candidate" ] && { RCUPDATE=$candidate; break; }; done
+        [ -x "${RCSERVICE:-/nonexistent}" ] && [ -x "${RCUPDATE:-/nonexistent}" ] || die "Linux systemd or OpenRC is required"
+        INIT_SYSTEM=openrc
+    fi
+}
+
+service_start() { validate_platform; if [ "$INIT_SYSTEM" = openrc ]; then "$RCSERVICE" "$1" start; else "$SYSTEMCTL" start "$1"; fi; }
+service_stop() { validate_platform; if [ "$INIT_SYSTEM" = openrc ]; then "$RCSERVICE" "$1" stop >/dev/null 2>&1 || true; else "$SYSTEMCTL" stop "$1" >/dev/null 2>&1 || true; fi; }
+service_active() { validate_platform; if [ "$INIT_SYSTEM" = openrc ]; then "$RCSERVICE" "$1" status >/dev/null 2>&1; else "$SYSTEMCTL" is-active --quiet "$1"; fi; }
+
+parse_ttl() {
+    ttl=$1
+    case "$ttl" in
+        [0-9]*m) number=${ttl%m}; seconds=$((number * 60)) ;;
+        [0-9]*h) number=${ttl%h}; seconds=$((number * 3600)) ;;
+        *) die "TTL must be an integer number of minutes or hours (30m or 1h)" ;;
+    esac
+    case "$number" in ''|*[!0-9]*) die "malformed TTL: $ttl" ;; esac
+    [ "$seconds" -ge 300 ] || die "TTL minimum is 5m"
+    [ "$seconds" -le 28800 ] || die "TTL maximum is 8h"
+    echo "$seconds"
+}
+
+validate_sudoers() { "$VISUDO" -cf "$SUDOERS" >/dev/null; }
+
+effective_unrestricted() {
+    "$VISUDO" -cf "$SUDOERS" >/dev/null 2>&1 || return 1
+    sudo -n -l -U "$1" 2>/dev/null | awk '/^[[:space:]]*\([^)]*\)[[:space:]]+NOPASSWD:[[:space:]]*ALL[[:space:]]*$/ { found=1 } END { exit(found ? 0 : 1) }'
+}
+
+write_rule() {
+    tmp=$(mktemp "${RULE}.XXXXXX")
+    trap 'rm -f "$tmp"' EXIT HUP INT TERM
+    # Group rules (notably Alpine's wheel rule) can match after the user
+    # specification and restore password authentication.  The scoped
+    # Defaults entry makes the temporary NOPASSWD contract effective for the
+    # configured user while this file exists; it disappears on off/expiry.
+    printf 'Defaults:%s !authenticate\n%s ALL=(ALL) NOPASSWD: ALL\n' "$AGENT_USER" "$AGENT_USER" > "$tmp"
+    chmod 440 "$tmp"; chown root:"$(id -gn root)" "$tmp"
+    "$VISUDO" -cf "$tmp" >/dev/null
+    mv -f "$tmp" "$RULE"
+    trap - EXIT HUP INT TERM
+}
+
+write_state() {
+    activated_epoch=$1; expires_epoch=$2; ttl=$3; persist_reboot=$4
+    tmp=$(mktemp "${STATE}.XXXXXX")
+    trap 'rm -f "$tmp"' EXIT HUP INT TERM
+    {
+        printf 'version=%s\n' "$VERSION"
+        printf 'user=%s\n' "$AGENT_USER"
+        printf 'activated_at_epoch=%s\n' "$activated_epoch"
+        printf 'expires_at_epoch=%s\n' "$expires_epoch"
+        printf 'ttl=%s\n' "$ttl"
+        printf 'persist_reboot=%s\n' "$persist_reboot"
+    } > "$tmp"
+    chmod 600 "$tmp"; chown root:"$(id -gn root)" "$tmp"; mv -f "$tmp" "$STATE"
+    trap - EXIT HUP INT TERM
+}
+
+state_value() { sed -n "s/^$1=//p" "$STATE" | head -n 1; }
+
+install_units() {
+    if [ "${INIT_SYSTEM:-}" = openrc ]; then
+        install -d -m 755 "$OPENRC_DIR"
+        install -o root -g "$(id -gn root)" -m 755 "$SOURCE_DIR/agent-temporary-boot.openrc" "$OPENRC_DIR/agent-temporary-boot"
+        install -o root -g "$(id -gn root)" -m 755 "$SOURCE_DIR/agent-temporary-expire.openrc" "$OPENRC_DIR/agent-temporary-expire"
+        "$RCUPDATE" add agent-temporary-boot default >/dev/null 2>&1 || true
+        "$RCUPDATE" add agent-temporary-expire default >/dev/null 2>&1 || true
+        return
+    fi
+    install -d -m 755 "$SYSTEMD_DIR"
+    install -o root -g "$(id -gn root)" -m 644 "$SOURCE_DIR/agent-temporary-expire.service" "$SYSTEMD_DIR/agent-temporary-expire.service"
+    install -o root -g "$(id -gn root)" -m 644 "$SOURCE_DIR/agent-temporary-expire.timer" "$SYSTEMD_DIR/agent-temporary-expire.timer"
+    install -o root -g "$(id -gn root)" -m 644 "$SOURCE_DIR/agent-temporary-boot.service" "$SYSTEMD_DIR/agent-temporary-boot.service"
+    "$SYSTEMCTL" daemon-reload
+    "$SYSTEMCTL" enable agent-temporary-boot.service >/dev/null
+    "$SYSTEMCTL" enable agent-temporary-expire.timer >/dev/null
+}
+
+do_install() {
+    need_root install; validate_platform
+    target_user=${AGENT_USER:-${SUDO_USER:-}}
+    [ -n "$target_user" ] || die "set AGENT_USER or run through sudo from the target user"
+    id "$target_user" >/dev/null 2>&1 || die "unknown user: $target_user"
+    install -d -m 755 "$PREFIX"; install -d -m 700 "$STATE_DIR"; install -d -m 700 "$STATE_DIR/backups"
+    stamp=$(date +%Y%m%d-%H%M%S); backup="$STATE_DIR/backups/$stamp"; install -d -m 700 "$backup"
+    for file in "$RULE" "$TARGET" "$CONFIG"; do [ -e "$file" ] && cp -p "$file" "$backup/$(basename "$file")" || true; done
+    rm -f "$RULE" "$STATE"
+    install -o root -g "$(id -gn root)" -m 755 "$0" "$TARGET"
+    tmp=$(mktemp "${CONFIG}.XXXXXX"); trap 'rm -f "$tmp"' EXIT HUP INT TERM
+    printf 'AGENT_USER=%s\n' "$target_user" > "$tmp"
+    chmod 600 "$tmp"; chown root:"$(id -gn root)" "$tmp"; mv -f "$tmp" "$CONFIG"
+    trap - EXIT HUP INT TERM
+    install_units
+    service_stop agent-temporary-expire
+    validate_sudoers
+    echo "Installed $TARGET version $VERSION for user $target_user; temporary access is inactive."
+}
+
+do_on() {
+    need_root on
+    ttl_text=; persist_reboot=no
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --ttl) [ "$#" -ge 2 ] || die "--ttl requires a duration"; [ -z "$ttl_text" ] || die "--ttl supplied more than once"; ttl_text=$2; shift 2 ;;
+            --persist-reboot) [ "$persist_reboot" = no ] || die "--persist-reboot supplied more than once"; persist_reboot=yes; shift ;;
+            *) die "unknown on option: $1" ;;
+        esac
+    done
+    [ "$persist_reboot" = no ] || [ -n "$ttl_text" ] || die "--persist-reboot requires explicit --ttl DURATION"
+    [ -n "$ttl_text" ] || ttl_text=$DEFAULT_TTL
+    ttl_seconds=$(parse_ttl "$ttl_text"); validate_platform; load_user
+    if [ -f "$STATE" ]; then
+        expires=$(state_value expires_at_epoch); now=$(date +%s)
+        if [ -n "$expires" ] && [ "$now" -lt "$expires" ] && effective_unrestricted "$AGENT_USER"; then
+            echo "already active; expires_at_epoch=$expires; no changes made."; exit 0
+        fi
+        die "already active or inconsistent: run status/off"
+    fi
+    now=$(date +%s); expires=$((now + ttl_seconds)); write_rule; write_state "$now" "$expires" "$ttl_text" "$persist_reboot"
+    if ! service_start agent-temporary-expire >/dev/null 2>&1; then rm -f "$RULE" "$STATE"; die "could not arm local expiry timer; privilege was revoked"; fi
+    validate_sudoers; echo "Temporary agent sudo access enabled for $AGENT_USER until epoch $expires."
+}
+
+do_off() {
+    need_root off; load_user; rm -f "$RULE" "$STATE"
+    service_stop agent-temporary-expire
+    validate_sudoers
+    if effective_unrestricted "$AGENT_USER"; then die "effective temporary privilege remains after revoke"; fi
+    echo "Temporary agent sudo access disabled."
+}
+
+do_expire() {
+    need_root internal; [ -f "$STATE" ] || exit 0; expires=$(state_value expires_at_epoch)
+    case "$expires" in ''|*[!0-9]*) rm -f "$RULE" "$STATE"; exit 0 ;; esac
+    [ "$(date +%s)" -ge "$expires" ] || exit 0; rm -f "$RULE" "$STATE"; validate_sudoers
+}
+
+do_expire_loop() {
+    need_root internal
+    while [ -f "$STATE" ]; do
+        expires=$(state_value expires_at_epoch); now=$(date +%s)
+        case "$expires" in ''|*[!0-9]*) rm -f "$RULE" "$STATE"; validate_sudoers; exit 0 ;; esac
+        if [ "$now" -ge "$expires" ]; then rm -f "$RULE" "$STATE"; validate_sudoers; exit 0; fi
+        sleep 1
+    done
+}
+
+do_boot_revoke() {
+    need_root internal
+    if [ ! -f "$STATE" ]; then rm -f "$RULE"; validate_sudoers; exit 0; fi
+    load_user; expires=$(state_value expires_at_epoch); now=$(date +%s); persist=$(state_value persist_reboot)
+    case "$expires" in ''|*[!0-9]*) rm -f "$RULE" "$STATE"; validate_sudoers; exit 0 ;; esac
+    if [ "$now" -ge "$expires" ]; then rm -f "$RULE" "$STATE"; service_stop agent-temporary-expire; validate_sudoers; exit 0; fi
+    if [ "$persist" != yes ]; then rm -f "$RULE" "$STATE"; service_stop agent-temporary-expire; validate_sudoers; exit 0; fi
+    if ! effective_unrestricted "$AGENT_USER"; then write_rule; fi
+    service_start agent-temporary-expire >/dev/null
+    validate_sudoers
+}
+
+do_status() {
+    if [ "$(id -u)" -ne 0 ] && { [ ! -r "$STATE" ] || [ ! -r "$RULE" ]; }; then
+        echo "status=inspection-requires-privilege"; echo "detail=root privileges are required to inspect effective temporary sudo state"; exit 0
+    fi
+    if [ ! -r "$CONFIG" ]; then echo "status=inspection-requires-privilege"; exit 0; fi
+    . "$CONFIG"; AGENT_USER=${AGENT_USER:-unknown}; rule_present=no; [ -e "$RULE" ] && rule_present=yes; state_present=no; [ -e "$STATE" ] && state_present=yes
+    if [ "$rule_present" = no ] && [ "$state_present" = no ]; then echo "state=inactive"; echo "user=$AGENT_USER"; echo "persist_reboot=no"; echo "version=$VERSION"; exit 0; fi
+    if [ "$rule_present" = yes ] && [ "$state_present" = no ]; then echo "status=broken/inconsistent"; echo "detail=effective rule without state"; exit 0; fi
+    if [ "$rule_present" = no ] && [ "$state_present" = yes ]; then
+        expires=$(state_value expires_at_epoch); now=$(date +%s)
+        if [ -n "$expires" ] && [ "$now" -ge "$expires" ]; then echo "state=expired"; else echo "status=broken/inconsistent"; echo "detail=state without effective rule"; fi
+        exit 0
+    fi
+    expires=$(state_value expires_at_epoch); now=$(date +%s)
+    if [ -z "$expires" ] || ! effective_unrestricted "$AGENT_USER"; then echo "status=broken/inconsistent"; echo "detail=state/rule is not effective"; exit 0; fi
+    if [ "$now" -ge "$expires" ]; then echo "status=broken/inconsistent"; echo "detail=expiry passed but privilege remains"; exit 0; fi
+    if ! service_active agent-temporary-expire; then echo "status=broken/inconsistent"; echo "detail=expiry timer is not active"; exit 0; fi
+    persist=$(state_value persist_reboot); [ "$persist" = yes ] || persist=no
+    remaining=$((expires - now)); echo "state=active"; echo "user=$AGENT_USER"; echo "version=$(state_value version)"; echo "activated_at_epoch=$(state_value activated_at_epoch)"; echo "expires_at_epoch=$expires"; echo "remaining_seconds=$remaining"; echo "ttl=$(state_value ttl)"; echo "persist_reboot=$persist"; echo "scope=unrestricted-root"; echo "authentication=NOPASSWD"
 }
 
 case "${1:-status}" in
-    install)
-        need_root install
-        target_user=${AGENT_USER:-${SUDO_USER:-}}
-        [ -n "$target_user" ] || {
-            echo "Set AGENT_USER or run through sudo from the target user" >&2
-            exit 1
-        }
-        id "$target_user" >/dev/null 2>&1 || {
-            echo "Unknown user: $target_user" >&2
-            exit 1
-        }
-
-        stamp=$(date +%Y%m%d-%H%M%S)
-        backup=/var/lib/agent-temporary/backups/$stamp
-        install -d -m 700 "$backup"
-        for file in "$RULE" "$TARGET" "$CONFIG"; do
-            [ -e "$file" ] && cp -p "$file" "$backup/$(basename "$file")"
-        done
-
-        install -d -m 755 "$PREFIX"
-        install -o root -g "$(id -gn root)" -m 755 "$0" "$TARGET"
-        tmp=$(mktemp "${CONFIG}.XXXXXX")
-        trap 'rm -f "$tmp"' EXIT HUP INT TERM
-        printf 'AGENT_USER=%s\n' "$target_user" > "$tmp"
-        chmod 600 "$tmp"
-        chown root:"$(id -gn root)" "$tmp"
-        mv -f "$tmp" "$CONFIG"
-        rm -f "$RULE"
-        validate_sudoers
-        trap - EXIT HUP INT TERM
-        echo "Installed $TARGET for user $target_user"
-        echo "Temporary access is disabled. Backup: $backup"
-        ;;
-    status)
-        if [ -e "$RULE" ]; then
-            echo "Temporary agent sudo access is enabled."
-        else
-            echo "Temporary agent sudo access is disabled."
-        fi
-        ;;
-    on)
-        need_root on
-        load_user
-        tmp=$(mktemp "${RULE}.XXXXXX")
-        trap 'rm -f "$tmp"' EXIT HUP INT TERM
-        printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$AGENT_USER" > "$tmp"
-        chmod 440 "$tmp"
-        chown root:"$(id -gn root)" "$tmp"
-        "$(visudo_path)" -cf "$tmp" >/dev/null
-        mv -f "$tmp" "$RULE"
-        trap - EXIT HUP INT TERM
-        validate_sudoers
-        echo "Temporary agent sudo access enabled for $AGENT_USER."
-        ;;
-    off)
-        need_root off
-        rm -f "$RULE"
-        validate_sudoers
-        echo "Temporary agent sudo access disabled."
-        ;;
-    *)
-        usage
-        ;;
+    install) do_install ;; on) shift; do_on "$@" ;; off) do_off ;; status) do_status ;; version) version ;;
+    --validate-ttl) [ "$#" -eq 2 ] || usage; parse_ttl "$2" >/dev/null; echo valid ;;
+    --internal-expire) do_expire ;; --internal-expire-loop) do_expire_loop ;; --internal-boot-revoke) do_boot_revoke ;; *) usage ;;
 esac

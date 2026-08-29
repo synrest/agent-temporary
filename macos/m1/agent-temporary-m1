@@ -1,0 +1,168 @@
+#!/bin/sh
+set -eu
+
+# M1 macOS lifecycle prototype. This intentionally manages only a harmless
+# root-owned marker; it does not create or inspect sudoers policy.
+VERSION=0.1-m1
+STATE_DIR=${AGENT_TEMPORARY_M1_STATE_DIR:-/var/db/agent-temporary-m1}
+STATE=${AGENT_TEMPORARY_M1_STATE:-$STATE_DIR/state}
+MARKER=${AGENT_TEMPORARY_M1_MARKER:-$STATE_DIR/test-authority}
+AGENT_USER=${AGENT_TEMPORARY_M1_USER:-zero}
+LABEL=${AGENT_TEMPORARY_M1_LABEL:-com.agent-temporary.m1}
+PLIST=${AGENT_TEMPORARY_M1_PLIST:-/Library/LaunchDaemons/$LABEL.plist}
+REAPER=${AGENT_TEMPORARY_M1_REAPER:-/usr/local/libexec/agent-temporary-reaper-m1}
+LAUNCHCTL=${LAUNCHCTL:-/bin/launchctl}
+SYSCTL=${SYSCTL:-/usr/sbin/sysctl}
+
+die() { echo "agent-temporary-m1: $*" >&2; exit 1; }
+need_root() { [ "$(id -u)" -eq 0 ] || die "run as root"; }
+usage() { echo "Usage: $0 {install|on [--ttl DURATION] [--persist-reboot]|off|status|--reaper}" >&2; exit 2; }
+
+boot_identity() {
+    "$SYSCTL" -n kern.boottime 2>/dev/null || return 1
+}
+
+parse_ttl() {
+    case "$1" in
+        [0-9]*m) n=${1%m}; s=$((n * 60)) ;;
+        [0-9]*h) n=${1%h}; s=$((n * 3600)) ;;
+        *) die "TTL must be an integer number of minutes or hours" ;;
+    esac
+    case "$n" in ''|*[!0-9]*) die "malformed TTL: $1" ;; esac
+    [ "$s" -ge 300 ] || die "TTL minimum is 5m"
+    [ "$s" -le 28800 ] || die "TTL maximum is 8h"
+    echo "$s"
+}
+
+state_value() { sed -n "s/^$1=//p" "$STATE" | head -n 1; }
+valid_state() {
+    [ -f "$STATE" ] || return 1
+    user=$(state_value user); activated=$(state_value activated_at); expires=$(state_value expires_at)
+    persist=$(state_value persist_reboot); boot=$(state_value activation_boot_identity)
+    [ -n "$user" ] && [ -n "$activated" ] && [ -n "$expires" ] && [ -n "$boot" ] || return 1
+    case "$activated:$expires" in *[!0-9:]*|*:|:*) return 1 ;; esac
+    [ "$persist" = yes ] || [ "$persist" = no ] || return 1
+}
+
+revoke() {
+    rm -f "$MARKER" "$STATE"
+}
+
+write_state() {
+    install -d -o root -g wheel -m 700 "$STATE_DIR"
+    tmp=$(mktemp "$STATE_DIR/.state.XXXXXX")
+    trap 'rm -f "$tmp"' EXIT HUP INT TERM
+    {
+        printf 'version=%s\n' "$VERSION"
+        printf 'user=%s\n' "$1"
+        printf 'activated_at=%s\n' "$2"
+        printf 'expires_at=%s\n' "$3"
+        printf 'persist_reboot=%s\n' "$4"
+        printf 'activation_boot_identity=%s\n' "$5"
+    } > "$tmp"
+    chmod 600 "$tmp"; chown root:wheel "$tmp"; mv -f "$tmp" "$STATE"
+    trap - EXIT HUP INT TERM
+}
+
+kick() {
+    "$LAUNCHCTL" print "system/$LABEL" >/dev/null 2>&1 || die "launch daemon is not loaded; run install"
+    "$LAUNCHCTL" kickstart -p "system/$LABEL" >/dev/null 2>&1 || die "launch daemon could not be started"
+}
+
+daemon_running() {
+    "$LAUNCHCTL" print "system/$LABEL" 2>/dev/null | grep -q 'state = running'
+}
+
+do_install() {
+    need_root
+    [ "$(uname -s)" = Darwin ] || die "macOS is required"
+    [ -x "$REAPER" ] || die "reaper missing: $REAPER"
+    [ -f "$PLIST" ] || die "plist missing: $PLIST"
+    /usr/bin/plutil -lint "$PLIST" >/dev/null || die "invalid launchd plist"
+    install -d -o root -g wheel -m 700 "$STATE_DIR"
+    chmod 755 "$REAPER"; chown root:wheel "$REAPER"
+    chmod 644 "$PLIST"; chown root:wheel "$PLIST"
+    "$LAUNCHCTL" bootstrap system "$PLIST" 2>/dev/null || {
+        "$LAUNCHCTL" print "system/$LABEL" >/dev/null 2>&1 || die "launchctl bootstrap failed"
+    }
+    echo "installed $LABEL; marker authority is inactive"
+}
+
+do_on() {
+    need_root
+    ttl_text=; persist=no
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --ttl) [ "$#" -ge 2 ] || usage; [ -z "$ttl_text" ] || die "--ttl repeated"; ttl_text=$2; shift 2 ;;
+            --persist-reboot) [ "$persist" = no ] || die "--persist-reboot repeated"; persist=yes; shift ;;
+            *) die "unknown option: $1" ;;
+        esac
+    done
+    [ "$persist" = no ] || [ -n "$ttl_text" ] || die "--persist-reboot requires explicit --ttl"
+    [ -n "$ttl_text" ] || ttl_text=5m
+    seconds=$(parse_ttl "$ttl_text"); boot=$(boot_identity) || die "cannot read boot identity"
+    id "$AGENT_USER" >/dev/null 2>&1 || die "unknown target user: $AGENT_USER"
+    now=$(date +%s); expires=$((now + seconds))
+    if valid_state; then
+        old_expires=$(state_value expires_at)
+        if [ "$now" -lt "$old_expires" ] && [ -e "$MARKER" ]; then
+            echo "already active; expires_at=$old_expires; no changes made."; exit 0
+        fi
+        revoke
+    else
+        [ ! -e "$STATE" ] || revoke
+        [ ! -e "$MARKER" ] || rm -f "$MARKER"
+    fi
+    install -d -o root -g wheel -m 700 "$STATE_DIR"
+    tmp=$(mktemp "$STATE_DIR/.marker.XXXXXX"); printf 'test-authority\n' > "$tmp"; chmod 600 "$tmp"; chown root:wheel "$tmp"; mv -f "$tmp" "$MARKER"
+    write_state "$AGENT_USER" "$now" "$expires" "$persist" "$boot"
+    if ! kick; then
+        revoke
+        die "activation rolled back because the launch daemon could not be started"
+    fi
+    echo "marker authority enabled until epoch $expires"
+}
+
+do_off() {
+    need_root; revoke
+    echo "marker authority disabled"
+}
+
+do_status() {
+    if ! valid_state; then
+        if [ -e "$STATE" ] || [ -e "$MARKER" ]; then
+            revoke
+            echo 'state=inconsistent'; echo 'effective_marker=false'; echo 'status=security-error'; echo 'detail=orphan-or-invalid-marker-revoked'
+        else
+            echo 'state=inactive'
+        fi
+        echo "version=$VERSION"; exit 0
+    fi
+    now=$(date +%s); expires=$(state_value expires_at)
+    if [ "$now" -ge "$expires" ]; then revoke; echo 'state=expired'; echo 'effective_marker=false'; exit 0; fi
+    if [ ! -e "$MARKER" ]; then echo 'state=inconsistent'; echo 'effective_marker=false'; echo 'detail=state-without-marker'; exit 0; fi
+    if ! daemon_running; then revoke; echo 'state=inconsistent'; echo 'effective_marker=false'; echo 'status=security-error'; echo 'detail=expiry-reaper-not-running-revoked'; exit 0; fi
+    echo 'state=active'; echo 'effective_marker=true'; echo "user=$(state_value user)"; echo "activated_at=$(state_value activated_at)"; echo "expires_at=$expires"; echo "remaining_seconds=$((expires-now))"; echo "persist_reboot=$(state_value persist_reboot)"; echo "activation_boot_identity=$(state_value activation_boot_identity)"; echo "version=$(state_value version)"
+}
+
+do_reaper() {
+    need_root
+    trap 'exit 0' HUP INT TERM
+    while :; do
+        if ! valid_state; then revoke; exit 0; fi
+        now=$(date +%s); expires=$(state_value expires_at); persist=$(state_value persist_reboot); old_boot=$(state_value activation_boot_identity); current_boot=$(boot_identity || true)
+        if [ -z "$current_boot" ] || { [ "$persist" != yes ] && [ "$current_boot" != "$old_boot" ]; }; then revoke; exit 0; fi
+        if [ "$now" -ge "$expires" ]; then revoke; exit 0; fi
+        [ -e "$MARKER" ] || { revoke; exit 0; }
+        sleep 1
+    done
+}
+
+case "${1:-status}" in
+    install) shift; [ "$#" -eq 0 ] || usage; do_install ;;
+    on) shift; do_on "$@" ;;
+    off) shift; [ "$#" -eq 0 ] || usage; do_off ;;
+    status) shift; [ "$#" -eq 0 ] || usage; do_status ;;
+    --reaper) shift; [ "$#" -eq 0 ] || usage; do_reaper ;;
+    *) usage ;;
+esac

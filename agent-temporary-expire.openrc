@@ -4,7 +4,10 @@ name="agent-temporary-expire"
 command="/usr/local/bin/agent-temporary"
 command_args="--internal-expire-loop"
 command_background=true
-pidfile="/run/agent-temporary-expire.pid"
+supervisor="supervise-daemon"
+respawn_delay=30
+respawn_max=5
+respawn_period=600
 
 depend() {
     need localmount

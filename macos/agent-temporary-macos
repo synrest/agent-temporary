@@ -27,9 +27,11 @@ SU=${SU:-/usr/bin/su}
 TRUE=${TRUE:-/usr/bin/true}
 KICK_ATTEMPTS=${KICK_ATTEMPTS:-100}
 KICK_SLEEP=${KICK_SLEEP:-0.1}
+REAPER_LOCK_ATTEMPTS=${REAPER_LOCK_ATTEMPTS:-100}
+REAPER_LOCK_SLEEP=${REAPER_LOCK_SLEEP:-0.1}
 
 die() { echo "agent-temporary: $*" >&2; exit 1; }
-usage() { echo "usage: agent-temporary-macos on [--ttl 5m|8h] | off | status | --reaper | --boot-revoke" >&2; exit 2; }
+usage() { echo "usage: agent-temporary-macos on [--ttl MINUTESm|HOURSh] | off | status | --reaper | --boot-revoke" >&2; exit 2; }
 
 require_root() { [ "$($ID -u 2>/dev/null)" = 0 ] || die "root is required"; }
 
@@ -49,6 +51,24 @@ boot_identity() { "$SYSCTL" -n kern.boottime 2>/dev/null; }
 state_value() { [ -f "$STATE" ] || return 1; sed -n "s/^$1=//p" "$STATE" | sed -n '1p'; }
 digits() { case $1 in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
 
+parse_ttl() {
+    ttl=$1
+    case "$ttl" in
+        [0-9]*m) number=${ttl%m}; unit=m;;
+        [0-9]*h) number=${ttl%h}; unit=h;;
+        *) die "TTL must be a positive integer number of minutes or hours";;
+    esac
+    digits "$number" || die "malformed TTL: $ttl"
+    while [ "${number#0}" != "$number" ]; do number=${number#0}; done
+    [ -n "$number" ] || die "TTL must be greater than zero"
+    case "$unit" in
+        m) [ "$number" -le 480 ] || die "TTL maximum is 8h"; seconds=$((number * 60));;
+        h) [ "$number" -le 8 ] || die "TTL maximum is 8h"; seconds=$((number * 3600));;
+    esac
+    [ "$seconds" -ge 300 ] || die "TTL minimum is 5m"
+    echo "$seconds"
+}
+
 valid_state() {
     [ -f "$STATE" ] || return 1
     phase=$(state_value phase) || return 1
@@ -60,11 +80,25 @@ valid_state() {
     [ -n "$user" ] && digits "$activated" && digits "$expires" && [ -n "$boot" ]
 }
 
-acquire_lock() {
+secure_state_dir() {
     "$MKDIR" -p "$STATE_DIR" 2>/dev/null || die "cannot create state directory"
     "$CHMOD" 700 "$STATE_DIR" 2>/dev/null || die "cannot secure state directory"
     "$CHOWN" root:wheel "$STATE_DIR" 2>/dev/null || die "cannot secure state ownership"
+}
+acquire_lock() {
+    secure_state_dir
     "$MKDIR" "$LOCK" 2>/dev/null || die "transaction already in progress"
+    "$CHMOD" 700 "$LOCK" 2>/dev/null || die "cannot secure transaction lock"
+    "$CHOWN" root:wheel "$LOCK" 2>/dev/null || die "cannot secure transaction lock ownership"
+    trap release_lock EXIT INT TERM
+}
+acquire_lock_wait() {
+    secure_state_dir
+    attempts=0
+    while ! "$MKDIR" "$LOCK" 2>/dev/null; do
+        [ "$attempts" -lt "$REAPER_LOCK_ATTEMPTS" ] || die "reaper transaction lock wait expired"
+        attempts=$((attempts + 1)); sleep "$REAPER_LOCK_SLEEP"
+    done
     "$CHMOD" 700 "$LOCK" 2>/dev/null || die "cannot secure transaction lock"
     "$CHOWN" root:wheel "$LOCK" 2>/dev/null || die "cannot secure transaction lock ownership"
     trap release_lock EXIT INT TERM
@@ -75,7 +109,7 @@ clear_state() { [ -e "$STATE" ] && "$RM" -f "$STATE"; }
 validate_full() { "$VISUDO" -cf "$SUDOERS" >/dev/null 2>&1; }
 
 exact_probe() {
-    if [ -n "$PROBE" ]; then "$PROBE" "$1"; else "$SU" "$1" -c "$SUDO -n $TRUE"; fi
+    if [ -n "$PROBE" ]; then "$PROBE" "$1"; else "$SU" "$1" -c "$SUDO -k; $SUDO -n $TRUE"; fi
 }
 
 daemon_running() {
@@ -150,7 +184,7 @@ on_cmd() {
     require_root; load_user; ttl=300
     while [ "$#" -gt 0 ]; do
         case $1 in
-            --ttl) [ "$#" -eq 2 ] || usage; case $2 in 5m) ttl=300;; 8h) ttl=28800;; *) usage;; esac; shift 2;;
+            --ttl) [ "$#" -eq 2 ] || usage; ttl=$(parse_ttl "$2") || exit 1; shift 2;;
             --persist-reboot) die "persist-reboot is not implemented on macOS M2.1";;
             *) usage;;
         esac
@@ -187,7 +221,7 @@ off_cmd() {
 }
 
 reaper_cmd() {
-    require_root; acquire_lock
+    require_root; acquire_lock_wait
     if ! valid_state || [ ! -e "$RULE" ]; then revoke_locked "$(state_value user 2>/dev/null || true)" || true; release_lock; exit 0; fi
     user=$(state_value user); expires=$(state_value expires_at); boot=$(state_value boot_identity); current_boot=$(boot_identity)
     if [ "$expires" -le "$(now)" ] || [ "$boot" != "$current_boot" ]; then revoke_locked "$user" || true; release_lock; exit 0; fi

@@ -75,7 +75,7 @@ clear_state() { [ -e "$STATE" ] && "$RM" -f "$STATE"; }
 validate_full() { "$VISUDO" -cf "$SUDOERS" >/dev/null 2>&1; }
 
 exact_probe() {
-    if [ -n "$PROBE" ]; then "$PROBE" "$1"; else "$SU" -s /bin/sh "$1" -c "$SUDO -n $TRUE"; fi
+    if [ -n "$PROBE" ]; then "$PROBE" "$1"; else "$SU" "$1" -c "$SUDO -n $TRUE"; fi
 }
 
 daemon_running() {

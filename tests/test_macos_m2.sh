@@ -60,6 +60,8 @@ FAKE_LAUNCH_MODE=ok
 run on >/dev/null; set_state_field boot_identity old-boot; run --boot-revoke >/dev/null; assert_absent
 grep -q 'com.agent-temporary.expire' "$ROOT/macos/com.agent-temporary.expire.plist"
 grep -q 'com.agent-temporary.boot' "$ROOT/macos/com.agent-temporary.boot.plist"
+grep -Fq '"$SU" "$1" -c "$SUDO -n $TRUE"' "$ROOT/macos/agent-temporary-macos"
+! grep -Fq '"$SU" -s /bin/sh' "$ROOT/macos/agent-temporary-macos"
 ! grep -q '<key>RunAtLoad</key>' "$ROOT/macos/com.agent-temporary.expire.plist"
 grep -q '<key>RunAtLoad</key>' "$ROOT/macos/com.agent-temporary.boot.plist"
 ! grep -R -q '90-temporary-agent\|com.agent-temporary.m1' "$ROOT/macos/agent-temporary-macos" "$ROOT/macos/agent-temporary-reaper" "$ROOT/macos/com.agent-temporary.expire.plist" "$ROOT/macos/com.agent-temporary.boot.plist"

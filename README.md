@@ -1,6 +1,6 @@
 # agent-temporary
 
-agent-temporary 0.5.0 — small utility for explicitly bounded temporary root access on Linux or macOS.
+agent-temporary 0.6.0 — small utility for explicitly bounded temporary root access on Linux or macOS.
 
 ## Contract
 
@@ -18,8 +18,9 @@ sudo ./uninstall.sh
 Activation defaults to a 5-minute TTL. The allowed range is 5 minutes through 8 hours;
 accepted forms are integer minutes or hours such as `30m`, `1h`, and `4h`.
 
-On macOS, `--persist-reboot` is unsupported in 0.5.0. On Linux, the existing
-0.4.0 behavior remains unchanged. Without persistence, boot revocation removes
+On macOS, `--persist-reboot` explicitly preserves the same grant across reboot
+until its original expiry. On Linux, the existing behavior remains unchanged.
+Without persistence, boot revocation removes
 temporary privilege.
 
 While active, the configured user has unrestricted `NOPASSWD: ALL` sudo access.

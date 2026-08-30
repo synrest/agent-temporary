@@ -8,8 +8,10 @@ STATE_DIR=${AGENT_TEMPORARY_M1_STATE_DIR:-/var/db/agent-temporary-m1}
 STATE=${AGENT_TEMPORARY_M1_STATE:-$STATE_DIR/state}
 MARKER=${AGENT_TEMPORARY_M1_MARKER:-$STATE_DIR/test-authority}
 AGENT_USER=${AGENT_TEMPORARY_M1_USER:-zero}
-LABEL=${AGENT_TEMPORARY_M1_LABEL:-com.agent-temporary.m1}
+LABEL=${AGENT_TEMPORARY_M1_LABEL:-com.agent-temporary.m1.expire}
+BOOT_LABEL=${AGENT_TEMPORARY_M1_BOOT_LABEL:-com.agent-temporary.m1.boot}
 PLIST=${AGENT_TEMPORARY_M1_PLIST:-/Library/LaunchDaemons/$LABEL.plist}
+BOOT_PLIST=${AGENT_TEMPORARY_M1_BOOT_PLIST:-/Library/LaunchDaemons/$BOOT_LABEL.plist}
 REAPER=${AGENT_TEMPORARY_M1_REAPER:-/usr/local/libexec/agent-temporary-reaper-m1}
 LAUNCHCTL=${LAUNCHCTL:-/bin/launchctl}
 SYSCTL=${SYSCTL:-/usr/sbin/sysctl}
@@ -67,6 +69,16 @@ write_state() {
 kick() {
     "$LAUNCHCTL" print "system/$LABEL" >/dev/null 2>&1 || die "launch daemon is not loaded; run install"
     "$LAUNCHCTL" kickstart -p "system/$LABEL" >/dev/null 2>&1 || die "launch daemon could not be started"
+    i=0
+    while [ "$i" -lt 100 ]; do
+        daemon_running && return 0
+        i=$((i + 1)); sleep 0.1
+    done
+    die "launch daemon did not become ready"
+}
+
+kick_expire_from_boot() {
+    "$LAUNCHCTL" kickstart -p "system/$LABEL" >/dev/null 2>&1 || true
 }
 
 daemon_running() {
@@ -78,13 +90,18 @@ do_install() {
     [ "$(uname -s)" = Darwin ] || die "macOS is required"
     [ -x "$REAPER" ] || die "reaper missing: $REAPER"
     [ -f "$PLIST" ] || die "plist missing: $PLIST"
+    [ -f "$BOOT_PLIST" ] || die "boot plist missing: $BOOT_PLIST"
     /usr/bin/plutil -lint "$PLIST" >/dev/null || die "invalid launchd plist"
+    /usr/bin/plutil -lint "$BOOT_PLIST" >/dev/null || die "invalid boot plist"
     install -d -o root -g wheel -m 700 "$STATE_DIR"
     chmod 755 "$REAPER"; chown root:wheel "$REAPER"
     chmod 644 "$PLIST"; chown root:wheel "$PLIST"
-    "$LAUNCHCTL" bootstrap system "$PLIST" 2>/dev/null || {
-        "$LAUNCHCTL" print "system/$LABEL" >/dev/null 2>&1 || die "launchctl bootstrap failed"
+    chmod 644 "$BOOT_PLIST"; chown root:wheel "$BOOT_PLIST"
+    "$LAUNCHCTL" bootstrap system "$PLIST" "$BOOT_PLIST" 2>/dev/null || {
+        "$LAUNCHCTL" print "system/$LABEL" >/dev/null 2>&1 || die "launchctl bootstrap failed for expiry job"
     }
+    "$LAUNCHCTL" print "system/$LABEL" >/dev/null 2>&1 || die "expiry job is not loaded"
+    "$LAUNCHCTL" print "system/$BOOT_LABEL" >/dev/null 2>&1 || die "boot-revoke job is not loaded"
     echo "installed $LABEL; marker authority is inactive"
 }
 
@@ -158,11 +175,23 @@ do_reaper() {
     done
 }
 
+do_boot_revoke() {
+    need_root
+    if ! valid_state; then revoke; exit 0; fi
+    now=$(date +%s); expires=$(state_value expires_at); persist=$(state_value persist_reboot)
+    case "$expires" in ''|*[!0-9]*) revoke; exit 0 ;; esac
+    if [ "$now" -ge "$expires" ] || [ "$persist" != yes ]; then
+        revoke; exit 0
+    fi
+    kick_expire_from_boot
+}
+
 case "${1:-status}" in
     install) shift; [ "$#" -eq 0 ] || usage; do_install ;;
     on) shift; do_on "$@" ;;
     off) shift; [ "$#" -eq 0 ] || usage; do_off ;;
     status) shift; [ "$#" -eq 0 ] || usage; do_status ;;
     --reaper) shift; [ "$#" -eq 0 ] || usage; do_reaper ;;
+    --boot-revoke) shift; [ "$#" -eq 0 ] || usage; do_boot_revoke ;;
     *) usage ;;
 esac

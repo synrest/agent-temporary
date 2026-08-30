@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION=0.4.0
+VERSION=0.5.0
 DEFAULT_TTL=5m
 PREFIX=${PREFIX:-/usr/local/bin}
 TARGET=${TARGET:-$PREFIX/agent-temporary}
@@ -19,6 +19,9 @@ VISUDO=${VISUDO:-visudo}
 SUDOERS=${AGENT_TEMPORARY_SUDOERS:-/etc/sudoers}
 EXPIRY_TIMER=agent-temporary-expire.timer
 SOURCE_DIR=${AGENT_TEMPORARY_RELEASE_DIR:-.}
+UNAME=${UNAME:-uname}
+
+OS=$($UNAME -s 2>/dev/null || true)
 
 usage() { echo "Usage: sudo $0 {install --user USER|on --ttl DURATION|off|status [--json]|version}" >&2; exit 2; }
 need_root() { [ "$(id -u)" -eq 0 ] || { echo "Run as root: sudo $0 $*" >&2; exit 1; }; }
@@ -33,6 +36,7 @@ load_user() {
 }
 
 validate_platform() {
+    [ "$OS" = Linux ] || die "Linux systemd or OpenRC is required"
     command -v "$VISUDO" >/dev/null 2>&1 || die "visudo is required"
     if command -v "$SYSTEMCTL" >/dev/null 2>&1 && { [ -d /run/systemd/system ] || "$SYSTEMCTL" show-environment >/dev/null 2>&1; }; then
         INIT_SYSTEM=systemd
@@ -40,6 +44,7 @@ validate_platform() {
         [ -n "$RCSERVICE" ] || for candidate in /sbin/rc-service /usr/sbin/rc-service; do [ -x "$candidate" ] && { RCSERVICE=$candidate; break; }; done
         [ -n "$RCUPDATE" ] || for candidate in /sbin/rc-update /usr/sbin/rc-update; do [ -x "$candidate" ] && { RCUPDATE=$candidate; break; }; done
         [ -x "${RCSERVICE:-/nonexistent}" ] && [ -x "${RCUPDATE:-/nonexistent}" ] || die "Linux systemd or OpenRC is required"
+        [ -e /run/openrc/softlevel ] || die "OpenRC is not active"
         INIT_SYSTEM=openrc
     fi
 }
@@ -154,6 +159,55 @@ do_install() {
     echo "Installed $TARGET version $VERSION for user $target_user; temporary access is inactive."
 }
 
+macos_plist_lint() {
+    command -v plutil >/dev/null 2>&1 || die "plutil is required on macOS"
+    plutil -lint "$1" >/dev/null || die "invalid launchd plist: $1"
+}
+
+macos_install_file() {
+    src=$1 dest=$2 mode=$3
+    [ -f "$src" ] || die "release file is missing: $src"
+    install -o root -g wheel -m "$mode" "$src" "$dest" || die "cannot install $dest"
+}
+
+do_install_macos() {
+    need_root install
+    command -v visudo >/dev/null 2>&1 || die "visudo is required"
+    [ ! -e /etc/sudoers.d/90-temporary-agent ] || die "legacy sudoers fragment exists; remove it before installation"
+    target_user=${INSTALL_USER:-${SUDO_USER:-}}
+    [ -n "$target_user" ] || die "set --user USER or run through sudo from the target user"
+    id "$target_user" >/dev/null 2>&1 || die "unknown user: $target_user"
+    macos_backend=$SOURCE_DIR/macos/agent-temporary-macos
+    macos_reaper=$SOURCE_DIR/macos/agent-temporary-reaper
+    macos_expire=$SOURCE_DIR/macos/com.agent-temporary.expire.plist
+    macos_boot=$SOURCE_DIR/macos/com.agent-temporary.boot.plist
+    for plist in "$macos_expire" "$macos_boot"; do macos_plist_lint "$plist"; done
+    sh -n "$macos_backend" "$macos_reaper"
+    if [ -e /etc/sudoers.d/90-agent-temporary ] || [ -e /var/db/agent-temporary/state ]; then
+        [ -x /usr/local/libexec/agent-temporary-macos ] || die "managed macOS authority exists but its backend is missing"
+        /usr/local/libexec/agent-temporary-macos off || die "cannot revoke existing macOS authority"
+    fi
+    "$VISUDO" -cf "$SUDOERS" >/dev/null || die "sudoers validation failed before installation"
+    install -d -o root -g wheel -m 755 /usr/local/bin /usr/local/libexec
+    install -d -o root -g wheel -m 700 /var/db/agent-temporary
+    macos_install_file "$macos_backend" /usr/local/libexec/agent-temporary-macos 755
+    macos_install_file "$macos_reaper" /usr/local/libexec/agent-temporary-reaper 755
+    macos_install_file "$macos_expire" /Library/LaunchDaemons/com.agent-temporary.expire.plist 644
+    macos_install_file "$macos_boot" /Library/LaunchDaemons/com.agent-temporary.boot.plist 644
+    tmp=$(mktemp /etc/agent-temporary.conf.XXXXXX)
+    printf 'CONFIG_USER=%s\n' "$target_user" > "$tmp"
+    chmod 600 "$tmp"; chown root:wheel "$tmp"; mv -f "$tmp" /etc/agent-temporary.conf
+    macos_install_file "$SOURCE_DIR/agent-temporary" "$TARGET" 755
+    launchctl bootout system/com.agent-temporary.expire >/dev/null 2>&1 || true
+    launchctl bootout system/com.agent-temporary.boot >/dev/null 2>&1 || true
+    launchctl bootstrap system /Library/LaunchDaemons/com.agent-temporary.expire.plist || die "cannot bootstrap expiry launchd job"
+    launchctl bootstrap system /Library/LaunchDaemons/com.agent-temporary.boot.plist || die "cannot bootstrap boot launchd job"
+    launchctl print system/com.agent-temporary.expire >/dev/null 2>&1 || die "expiry launchd job is not loaded"
+    launchctl print system/com.agent-temporary.boot >/dev/null 2>&1 || die "boot launchd job is not loaded"
+    "$VISUDO" -cf "$SUDOERS" >/dev/null || die "sudoers validation failed after installation"
+    echo "Installed $TARGET version $VERSION for user $target_user; temporary access is inactive."
+}
+
 do_on() {
     need_root on
     ttl_text=; persist_reboot=no
@@ -245,8 +299,17 @@ do_status() {
     remaining=$((expires - now)); echo "state=active"; echo "effective_authority=true"; echo "user=$AGENT_USER"; echo "version=$(state_value version)"; echo "activated_at_epoch=$(state_value activated_at_epoch)"; echo "expires_at_epoch=$expires"; echo "remaining_seconds=$remaining"; echo "ttl=$(state_value ttl)"; echo "persist_reboot=$persist"; echo "scope=unrestricted-root"; echo "authentication=NOPASSWD"
 }
 
+if [ "$OS" = Darwin ]; then
+    case "${1:-status}" in
+        install) shift; INSTALL_USER=; [ "${1:-}" = --user ] && { [ "$#" -eq 2 ] || usage; INSTALL_USER=$2; }; do_install_macos ;;
+        version) [ "$#" -eq 1 ] || usage; echo "agent-temporary $VERSION" ;;
+        --validate-ttl) [ "$#" -eq 2 ] || usage; parse_ttl "$2" >/dev/null; echo valid ;;
+        *) exec /usr/local/libexec/agent-temporary-macos "$@" ;;
+    esac
+    exit 0
+fi
+
 case "${1:-status}" in
-    install) shift; INSTALL_USER=; [ "${1:-}" = --user ] && { [ "$#" -eq 2 ] || usage; INSTALL_USER=$2; }; do_install ;;
     on) shift; do_on "$@" ;; off) do_off ;; status)
         shift; STATUS_JSON=no
         if [ "$#" -eq 1 ] && [ "$1" = --json ]; then STATUS_JSON=yes

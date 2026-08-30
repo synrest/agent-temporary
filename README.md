@@ -1,6 +1,6 @@
 # agent-temporary
 
-agent-temporary 0.4.0 — small Linux utility for explicitly bounded temporary root access on systemd or OpenRC.
+agent-temporary 0.5.0 — small utility for explicitly bounded temporary root access on Linux or macOS.
 
 ## Contract
 
@@ -18,9 +18,9 @@ sudo ./uninstall.sh
 Activation defaults to a 5-minute TTL. The allowed range is 5 minutes through 8 hours;
 accepted forms are integer minutes or hours such as `30m`, `1h`, and `4h`.
 
-`--persist-reboot` is exceptional and requires an explicit `--ttl`. It preserves
-the original absolute expiry across reboot; it never resets or extends the TTL.
-Without it, boot revocation removes temporary privilege.
+On macOS, `--persist-reboot` is unsupported in 0.5.0. On Linux, the existing
+0.4.0 behavior remains unchanged. Without persistence, boot revocation removes
+temporary privilege.
 
 While active, the configured user has unrestricted `NOPASSWD: ALL` sudo access.
 The privilege is bounded by a local expiry supervisor and is revoked on boot.
@@ -35,11 +35,12 @@ as effective authority. `status --json` is accepted for machine-readable integra
 
 ## Platform
 
-Supported: Linux with systemd or OpenRC and sudo/visudo. OpenRC is detected through
-its native service tools, including their standard `/sbin` locations.
+Supported: Linux with an active systemd or OpenRC runtime and sudo/visudo, or
+macOS with launchd and sudo/visudo. OpenRC is detected through its native runtime
+state and service tools, including their standard `/sbin` locations.
 
-Unsupported: macOS and Linux with another/unknown init system; unsupported platforms
-fail closed and are not given a synthetic systemd setup.
+Unsupported: Linux with another/unknown init system and unsupported platforms;
+they fail closed and are not given a synthetic systemd setup.
 
 ## Release
 
@@ -49,7 +50,7 @@ Build a release artifact with:
 ./release.sh
 ```
 
-The resulting directory contains the executable, systemd/OpenRC service definitions, `VERSION`,
+The resulting directory contains the executable, systemd/OpenRC/launchd service definitions, `VERSION`,
 `SHA256SUMS`, and a deterministic `install.sh`. It also creates
 `dist/agent-temporary-X.Y.Z.zip` and its SHA-256 sidecar. The archive contains no Git metadata,
 runtime state, logs, or private material; after extraction, run

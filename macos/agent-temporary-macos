@@ -1,0 +1,215 @@
+#!/bin/sh
+
+VERSION=0.5.0-m2.1
+RULE=${AGENT_TEMPORARY_RULE:-/etc/sudoers.d/90-agent-temporary}
+STATE_DIR=${AGENT_TEMPORARY_STATE_DIR:-/var/db/agent-temporary}
+STATE=${AGENT_TEMPORARY_STATE:-$STATE_DIR/state}
+LOCK=${AGENT_TEMPORARY_LOCK:-$STATE_DIR/.lock}
+SUDOERS=${AGENT_TEMPORARY_SUDOERS:-/etc/sudoers}
+CONFIG=${AGENT_TEMPORARY_CONFIG:-/etc/agent-temporary.conf}
+EXPIRY_LABEL=com.agent-temporary.expire
+
+ID=${ID:-/usr/bin/id}
+DATE=${DATE:-/bin/date}
+SYSCTL=${SYSCTL:-/usr/sbin/sysctl}
+MKTEMP=${MKTEMP:-/usr/bin/mktemp}
+MV=${MV:-/bin/mv}
+RM=${RM:-/bin/rm}
+MKDIR=${MKDIR:-/bin/mkdir}
+RMDIR=${RMDIR:-/bin/rmdir}
+CHMOD=${CHMOD:-/bin/chmod}
+CHOWN=${CHOWN:-/usr/sbin/chown}
+VISUDO=${VISUDO:-/usr/sbin/visudo}
+LAUNCHCTL=${LAUNCHCTL:-/bin/launchctl}
+PROBE=${PROBE:-}
+SUDO=${SUDO:-/usr/bin/sudo}
+SU=${SU:-/usr/bin/su}
+TRUE=${TRUE:-/usr/bin/true}
+KICK_ATTEMPTS=${KICK_ATTEMPTS:-100}
+KICK_SLEEP=${KICK_SLEEP:-0.1}
+
+die() { echo "agent-temporary: $*" >&2; exit 1; }
+usage() { echo "usage: agent-temporary-macos on [--ttl 5m|8h] | off | status | --reaper | --boot-revoke" >&2; exit 2; }
+
+require_root() { [ "$($ID -u 2>/dev/null)" = 0 ] || die "root is required"; }
+
+load_user() {
+    TARGET_USER=${AGENT_TEMPORARY_USER:-}
+    if [ -r "$CONFIG" ]; then
+        CONFIG_USER=
+        . "$CONFIG"
+        [ -n "$CONFIG_USER" ] && TARGET_USER=$CONFIG_USER
+    fi
+    [ -n "$TARGET_USER" ] || die "configured target user is required"
+    "$ID" "$TARGET_USER" >/dev/null 2>&1 || die "unknown target user: $TARGET_USER"
+}
+
+now() { "$DATE" +%s; }
+boot_identity() { "$SYSCTL" -n kern.boottime 2>/dev/null; }
+state_value() { [ -f "$STATE" ] || return 1; sed -n "s/^$1=//p" "$STATE" | sed -n '1p'; }
+digits() { case $1 in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
+
+valid_state() {
+    [ -f "$STATE" ] || return 1
+    phase=$(state_value phase) || return 1
+    user=$(state_value user) || return 1
+    activated=$(state_value activated_at) || return 1
+    expires=$(state_value expires_at) || return 1
+    boot=$(state_value boot_identity) || return 1
+    [ "$phase" = active ] || [ "$phase" = prepared ] || return 1
+    [ -n "$user" ] && digits "$activated" && digits "$expires" && [ -n "$boot" ]
+}
+
+acquire_lock() {
+    "$MKDIR" -p "$STATE_DIR" 2>/dev/null || die "cannot create state directory"
+    "$CHMOD" 700 "$STATE_DIR" 2>/dev/null || die "cannot secure state directory"
+    "$CHOWN" root:wheel "$STATE_DIR" 2>/dev/null || die "cannot secure state ownership"
+    "$MKDIR" "$LOCK" 2>/dev/null || die "transaction already in progress"
+    "$CHMOD" 700 "$LOCK" 2>/dev/null || die "cannot secure transaction lock"
+    "$CHOWN" root:wheel "$LOCK" 2>/dev/null || die "cannot secure transaction lock ownership"
+    trap release_lock EXIT INT TERM
+}
+release_lock() { "$RMDIR" "$LOCK" 2>/dev/null || true; trap - EXIT INT TERM; }
+remove_rule() { [ -e "$RULE" ] && "$RM" -f "$RULE"; }
+clear_state() { [ -e "$STATE" ] && "$RM" -f "$STATE"; }
+validate_full() { "$VISUDO" -cf "$SUDOERS" >/dev/null 2>&1; }
+
+exact_probe() {
+    if [ -n "$PROBE" ]; then "$PROBE" "$1"; else "$SU" -s /bin/sh "$1" -c "$SUDO -n $TRUE"; fi
+}
+
+daemon_running() {
+    "$LAUNCHCTL" print "system/$EXPIRY_LABEL" 2>/dev/null | grep -q 'state = running'
+}
+
+kick_reaper() {
+    "$LAUNCHCTL" print "system/$EXPIRY_LABEL" >/dev/null 2>&1 || return 1
+    "$LAUNCHCTL" kickstart -p "system/$EXPIRY_LABEL" >/dev/null 2>&1 || return 1
+    i=0
+    while [ "$i" -lt "$KICK_ATTEMPTS" ]; do
+        daemon_running && return 0
+        i=$((i + 1)); sleep "$KICK_SLEEP"
+    done
+    return 1
+}
+
+write_state() {
+    phase=$1 user=$2 activated=$3 expires=$4 boot=$5
+    tmp=$($MKTEMP "$STATE.XXXXXX") || return 1
+    if ! { printf 'phase=%s\n' "$phase"; printf 'user=%s\n' "$user"; printf 'activated_at=%s\n' "$activated"; printf 'expires_at=%s\n' "$expires"; printf 'boot_identity=%s\n' "$boot"; } >"$tmp"; then
+        "$RM" -f "$tmp"; return 1
+    fi
+    "$CHMOD" 600 "$tmp" 2>/dev/null || { "$RM" -f "$tmp"; return 1; }
+    "$CHOWN" root:wheel "$tmp" 2>/dev/null || { "$RM" -f "$tmp"; return 1; }
+    "$MV" "$tmp" "$STATE" 2>/dev/null || { "$RM" -f "$tmp"; return 1; }
+}
+
+write_candidate() {
+    user=$1
+    tmp=$($MKTEMP "$RULE.XXXXXX") || return 1
+    if ! { printf 'Defaults:%s !authenticate\n' "$user"; printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$user"; } >"$tmp"; then
+        "$RM" -f "$tmp"; return 1
+    fi
+    "$CHMOD" 440 "$tmp" 2>/dev/null || { "$RM" -f "$tmp"; return 1; }
+    "$CHOWN" root:wheel "$tmp" 2>/dev/null || { "$RM" -f "$tmp"; return 1; }
+    "$VISUDO" -cf "$tmp" >/dev/null 2>&1 || { "$RM" -f "$tmp"; return 1; }
+    CANDIDATE=$tmp
+}
+
+rollback() {
+    [ -n "${CANDIDATE:-}" ] && "$RM" -f "$CANDIDATE" 2>/dev/null || true
+    remove_rule; clear_state; validate_full || true
+}
+
+revoke_locked() {
+    user=${1:-}; validation_failed=0
+    remove_rule
+    validate_full || validation_failed=1
+    clear_state
+    if [ -n "$user" ] && exact_probe "$user" >/dev/null 2>&1; then probe_failed=1; else probe_failed=0; fi
+    [ "$validation_failed" = 0 ] && [ "$probe_failed" = 0 ]
+}
+
+classify_before_on() {
+    if [ -e "$RULE" ] && ! valid_state; then revoke_locked "${TARGET_USER:-}" || true; return 0; fi
+    if [ -f "$STATE" ] && [ ! -e "$RULE" ]; then clear_state; return 0; fi
+    if valid_state; then
+        phase=$(state_value phase); expires=$(state_value expires_at)
+        if [ "$phase" != active ] || [ "$expires" -le "$(now)" ]; then
+            revoke_locked "$(state_value user)" || true
+        elif [ -e "$RULE" ]; then
+            if exact_probe "$(state_value user)" >/dev/null 2>&1 && daemon_running; then
+                echo "already active; expires_at=$expires; no changes made."; exit 0
+            fi
+            revoke_locked "$(state_value user)" || true
+        fi
+    fi
+}
+
+on_cmd() {
+    require_root; load_user; ttl=300
+    while [ "$#" -gt 0 ]; do
+        case $1 in
+            --ttl) [ "$#" -eq 2 ] || usage; case $2 in 5m) ttl=300;; 8h) ttl=28800;; *) usage;; esac; shift 2;;
+            --persist-reboot) die "persist-reboot is not implemented on macOS M2.1";;
+            *) usage;;
+        esac
+    done
+    acquire_lock; classify_before_on
+    started=$(now); expires=$((started + ttl)); boot=$(boot_identity) || { release_lock; die "cannot determine boot identity"; }
+    write_candidate "$TARGET_USER" || { rollback; release_lock; die "cannot prepare sudoers candidate"; }
+    write_state prepared "$TARGET_USER" "$started" "$expires" "$boot" || { rollback; release_lock; die "cannot write prepared state"; }
+    "$MV" "$CANDIDATE" "$RULE" 2>/dev/null || { rollback; release_lock; die "cannot install sudoers fragment"; }
+    CANDIDATE=
+    validate_full || { rollback; release_lock; die "complete sudoers validation failed"; }
+    exact_probe "$TARGET_USER" >/dev/null 2>&1 || { rollback; release_lock; die "exact authority probe failed"; }
+    write_state active "$TARGET_USER" "$started" "$expires" "$boot" || { rollback; release_lock; die "cannot commit active state"; }
+    kick_reaper || { rollback; release_lock; die "expiry launchd job is not ready"; }
+    echo "Temporary agent access enabled for $TARGET_USER until epoch $expires."
+}
+
+status_cmd() {
+    require_root; acquire_lock
+    if [ ! -e "$RULE" ] && [ ! -e "$STATE" ]; then echo 'state=inactive'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0; fi
+    if ! valid_state; then remove_rule; clear_state; validate_full || true; echo 'state=inconsistent'; echo 'detail=orphan-or-invalid-authority'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0; fi
+    user=$(state_value user); expires=$(state_value expires_at)
+    if [ ! -e "$RULE" ]; then clear_state; echo 'state=inconsistent'; echo 'detail=state-without-authority'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0; fi
+    if [ "$expires" -le "$(now)" ]; then revoke_locked "$user" || true; echo 'state=expired'; echo 'effective_authority=false'; echo "expires_at=$expires"; echo "version=$VERSION"; return 0; fi
+    if ! daemon_running; then revoke_locked "$user" || true; echo 'state=inconsistent'; echo 'detail=reaper-unavailable'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0; fi
+    if ! exact_probe "$user" >/dev/null 2>&1; then revoke_locked "$user" || true; echo 'state=inconsistent'; echo 'detail=effective-authority-failed'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0; fi
+    echo 'state=active'; echo 'effective_authority=true'; echo "user=$user"; echo "activated_at=$(state_value activated_at)"; echo "expires_at=$expires"; echo "remaining_seconds=$((expires - $(now)))"; echo 'persist_reboot=no'; echo "version=$VERSION"
+}
+
+off_cmd() {
+    require_root; user=${AGENT_TEMPORARY_USER:-}; [ -f "$STATE" ] && user=$(state_value user 2>/dev/null || printf '%s' "$user"); acquire_lock
+    revoke_locked "$user" || { release_lock; die "revocation validation or exact probe failed"; }
+    echo 'Temporary agent access disabled.'
+}
+
+reaper_cmd() {
+    require_root; acquire_lock
+    if ! valid_state || [ ! -e "$RULE" ]; then revoke_locked "$(state_value user 2>/dev/null || true)" || true; release_lock; exit 0; fi
+    user=$(state_value user); expires=$(state_value expires_at); boot=$(state_value boot_identity); current_boot=$(boot_identity)
+    if [ "$expires" -le "$(now)" ] || [ "$boot" != "$current_boot" ]; then revoke_locked "$user" || true; release_lock; exit 0; fi
+    release_lock
+    while :; do
+        [ -f "$STATE" ] && [ -e "$RULE" ] || exit 0
+        [ "$(now)" -ge "$expires" ] && { acquire_lock; revoke_locked "$user" || true; release_lock; exit 0; }
+        sleep 1
+    done
+}
+
+boot_revoke_cmd() {
+    require_root; acquire_lock
+    if [ -e "$RULE" ] || [ -e "$STATE" ]; then revoke_locked "$(state_value user 2>/dev/null || true)" || true; fi
+}
+
+case ${1:-} in
+    on) shift; on_cmd "$@";;
+    off) shift; [ "$#" -eq 0 ] || usage; off_cmd;;
+    status) shift; [ "$#" -eq 0 ] || usage; status_cmd;;
+    --reaper) [ "$#" -eq 1 ] || usage; reaper_cmd;;
+    --boot-revoke) [ "$#" -eq 1 ] || usage; boot_revoke_cmd;;
+    version|--version) [ "$#" -eq 1 ] || usage; echo "agent-temporary $VERSION";;
+    *) usage;;
+esac

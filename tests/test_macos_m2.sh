@@ -11,7 +11,7 @@ mkdir -p "$STATE_DIR" "$(dirname "$RULE")"
 : >"$SUDOERS"
 ID=$TMP/id; VISUDO=$TMP/visudo; LAUNCHCTL=$TMP/launchctl; PROBE=$TMP/probe
 SYSCTL=$TMP/sysctl; MKTEMP=$TMP/mktemp; CHOWN=$TMP/chown; MV=$TMP/mv; COUNT=$TMP/count
-printf '%s\n' '#!/bin/sh' '[ "$1" = -u ] && { echo 0; exit 0; }' 'exit 0' >"$ID"
+printf '%s\n' '#!/bin/sh' '[ "$FAKE_ID_MODE" = nonroot ] && [ "$1" = -u ] && { echo 501; exit 0; }' '[ "$1" = -u ] && { echo 0; exit 0; }' 'exit 0' >"$ID"
 printf '%s\n' '#!/bin/sh' '[ "$FAKE_SYSCTL_MODE" = malformed ] && { echo malformed; exit 0; }' 'echo "{ sec = 1788047880, usec = 142950 } Sat Aug 29 18:58:00 2026"' >"$SYSCTL"
 printf '%s\n' '#!/bin/sh' 'exit 0' >"$CHOWN"
 printf '%s\n' '#!/bin/sh' '[ "$FAKE_MV_MODE" = fail ] && [ "$2" = "$FAKE_RULE" ] && exit 1' 'exec /bin/mv "$@"' >"$MV"
@@ -23,7 +23,7 @@ chmod 755 "$ID" "$SYSCTL" "$CHOWN" "$MV" "$PROBE" "$VISUDO" "$LAUNCHCTL" "$MKTEM
 FAKE_VISUDO_MODE=ok; FAKE_PROBE_MODE=ok; FAKE_LAUNCH_MODE=ok; FAKE_MKTEMP_FAIL_AT=0; FAKE_MV_MODE=ok
 export FAKE_VISUDO_MODE FAKE_PROBE_MODE FAKE_LAUNCH_MODE FAKE_MKTEMP_FAIL_AT FAKE_MV_MODE
 run() {
-    env AGENT_TEMPORARY_USER=alice AGENT_TEMPORARY_STATE_DIR="$STATE_DIR" AGENT_TEMPORARY_RULE="$RULE" AGENT_TEMPORARY_SUDOERS="$SUDOERS" AGENT_TEMPORARY_LOCK="$LOCK" ID="$ID" SYSCTL="$SYSCTL" VISUDO="$VISUDO" LAUNCHCTL="$LAUNCHCTL" PROBE="$PROBE" MKTEMP="$MKTEMP" CHOWN="$CHOWN" MV="$MV" KICK_ATTEMPTS=2 KICK_SLEEP=0.01 REAPER_LOCK_ATTEMPTS="${REAPER_LOCK_ATTEMPTS:-100}" REAPER_LOCK_SLEEP="${REAPER_LOCK_SLEEP:-0.01}" FAKE_COUNT="$COUNT" FAKE_RULE="$RULE" FAKE_SUDOERS="$SUDOERS" FAKE_VISUDO_MODE="$FAKE_VISUDO_MODE" FAKE_PROBE_MODE="$FAKE_PROBE_MODE" FAKE_LAUNCH_MODE="$FAKE_LAUNCH_MODE" FAKE_SYSCTL_MODE="${FAKE_SYSCTL_MODE:-}" FAKE_MKTEMP_FAIL_AT="$FAKE_MKTEMP_FAIL_AT" FAKE_MV_MODE="$FAKE_MV_MODE" "$ROOT/macos/agent-temporary-macos" "$@"
+    env AGENT_TEMPORARY_USER=alice AGENT_TEMPORARY_STATE_DIR="$STATE_DIR" AGENT_TEMPORARY_RULE="$RULE" AGENT_TEMPORARY_SUDOERS="$SUDOERS" AGENT_TEMPORARY_LOCK="$LOCK" ID="$ID" SYSCTL="$SYSCTL" VISUDO="$VISUDO" LAUNCHCTL="$LAUNCHCTL" PROBE="$PROBE" MKTEMP="$MKTEMP" CHOWN="$CHOWN" MV="$MV" KICK_ATTEMPTS=2 KICK_SLEEP=0.01 REAPER_LOCK_ATTEMPTS="${REAPER_LOCK_ATTEMPTS:-100}" REAPER_LOCK_SLEEP="${REAPER_LOCK_SLEEP:-0.01}" FAKE_COUNT="$COUNT" FAKE_RULE="$RULE" FAKE_SUDOERS="$SUDOERS" FAKE_VISUDO_MODE="$FAKE_VISUDO_MODE" FAKE_PROBE_MODE="$FAKE_PROBE_MODE" FAKE_LAUNCH_MODE="$FAKE_LAUNCH_MODE" FAKE_SYSCTL_MODE="${FAKE_SYSCTL_MODE:-}" FAKE_MKTEMP_FAIL_AT="$FAKE_MKTEMP_FAIL_AT" FAKE_MV_MODE="$FAKE_MV_MODE" FAKE_ID_MODE="${FAKE_ID_MODE:-}" "$ROOT/macos/agent-temporary-macos" "$@"
 }
 assert_absent() { [ ! -e "$RULE" ] && [ ! -e "$STATE_DIR/state" ]; }
 set_state_field() {
@@ -60,6 +60,11 @@ run on --ttl 8h >"$TMP/repeat"; grep -q 'already active' "$TMP/repeat"
 [ "$(sed -n 's/^expires_at=//p' "$STATE_DIR/state")" = "$expiry" ]
 for invalid in 4m 9h 500m 5s abc; do assert_rejected "$invalid"; done
 run off >/dev/null; assert_absent
+FAKE_ID_MODE=nonroot run status >"$TMP/nonroot-status"
+grep -qx 'state=inactive' "$TMP/nonroot-status"
+grep -qx 'effective_authority=false' "$TMP/nonroot-status"
+! grep -q 'root is required' "$TMP/nonroot-status"
+FAKE_ID_MODE=
 rm -f "$RULE" "$STATE_DIR/state"; if FAKE_SYSCTL_MODE=malformed run on --ttl 5m >/dev/null 2>&1; then exit 1; fi; assert_absent
 FAKE_SYSCTL_MODE=
 if run off --persist-reboot >/dev/null 2>&1; then exit 1; fi
@@ -109,6 +114,20 @@ rm -f "$RULE" "$STATE_DIR/state"
 mkdir "$LOCK"
 if REAPER_LOCK_ATTEMPTS=2 REAPER_LOCK_SLEEP=0.01 run --reaper >/dev/null 2>&1; then exit 1; fi
 rmdir "$LOCK"
+run on --ttl 5m >/dev/null
+mkdir "$LOCK"
+( sleep 0.05; rmdir "$LOCK" ) & transient_unlock=$!
+run off >/dev/null
+wait "$transient_unlock"
+assert_absent
+run on --ttl 5m >/dev/null
+mkdir "$LOCK"
+if REAPER_LOCK_ATTEMPTS=2 REAPER_LOCK_SLEEP=0.01 run off >/dev/null 2>&1; then exit 1; fi
+[ -e "$RULE" ] && [ -e "$STATE_DIR/state" ]
+rmdir "$LOCK"
+REAPER_LOCK_ATTEMPTS=100; REAPER_LOCK_SLEEP=0.01
+run off >/dev/null
+assert_absent
 run on >/dev/null; set_state_field expires_at 1; run status >/dev/null; assert_absent
 printf '%s\n' 'Defaults:alice !authenticate' 'alice ALL=(ALL) NOPASSWD: ALL' >"$RULE"; run status >"$TMP/orphan"; grep -q 'state=inconsistent' "$TMP/orphan"; assert_absent
 run on >/dev/null; rm -f "$RULE"; run status >"$TMP/missing"; grep -q 'state=inconsistent' "$TMP/missing"; [ ! -e "$STATE_DIR/state" ]

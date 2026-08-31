@@ -1,6 +1,6 @@
 # agent-temporary
 
-agent-temporary 0.6.0 — small utility for explicitly bounded temporary root access on Linux or macOS.
+agent-temporary 0.7.0 — small utility for explicitly bounded temporary root access on Linux or macOS.
 
 ## Contract
 
@@ -14,6 +14,22 @@ agent-temporary status
 agent-temporary version
 sudo ./uninstall.sh
 ```
+
+The npm distribution installs only an unprivileged setup command:
+
+```sh
+npm install -g agent-temporary
+agent-temporary-setup install
+agent-temporary status
+agent-temporary-setup update
+npm uninstall -g agent-temporary
+agent-temporary-setup uninstall-system
+```
+
+`npm install` and `npm uninstall` affect only the npm package. The explicit setup
+commands invoke the existing system installer or uninstaller and request administrator
+privileges; they do not activate temporary access. To update the setup package, use
+`npm install -g agent-temporary@latest` and then run `agent-temporary-setup update`.
 
 Activation defaults to a 5-minute TTL. The allowed range is 5 minutes through 8 hours;
 accepted forms are integer minutes or hours such as `30m`, `1h`, and `4h`.

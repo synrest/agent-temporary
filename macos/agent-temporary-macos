@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION=0.7.0
+VERSION=0.7.1
 RULE=${AGENT_TEMPORARY_RULE:-/etc/sudoers.d/90-agent-temporary}
 STATE_DIR=${AGENT_TEMPORARY_STATE_DIR:-/var/db/agent-temporary}
 STATE=${AGENT_TEMPORARY_STATE:-$STATE_DIR/state}

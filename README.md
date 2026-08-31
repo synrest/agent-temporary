@@ -1,6 +1,6 @@
 # agent-temporary
 
-agent-temporary 0.7.0 — small utility for explicitly bounded temporary root access on Linux or macOS.
+agent-temporary 0.7.1 — small utility for explicitly bounded temporary root access on Linux or macOS.
 
 ## Contract
 
@@ -30,6 +30,19 @@ agent-temporary-setup uninstall-system
 commands invoke the existing system installer or uninstaller and request administrator
 privileges; they do not activate temporary access. To update the setup package, use
 `npm install -g agent-temporary@latest` and then run `agent-temporary-setup update`.
+
+Users without npm may use the version-pinned shell bootstrap:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/synrest/agent-temporary/v0.7.1/bootstrap/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/synrest/agent-temporary/v0.7.1/bootstrap/install.sh -o agent-temporary-install.sh
+sh agent-temporary-install.sh
+```
+
+The bootstrap downloads and verifies the matching 0.7.1 release ZIP before
+delegating system changes to the existing `install.sh`. It does not activate
+temporary access. Inspect the downloaded script before running it when using the
+inspect-first form.
 
 Activation defaults to a 5-minute TTL. The allowed range is 5 minutes through 8 hours;
 accepted forms are integer minutes or hours such as `30m`, `1h`, and `4h`.

@@ -2,7 +2,7 @@
 set -eu
 cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 sh -n agent-temporary release.sh
-[ "$(./agent-temporary version)" = "agent-temporary 0.7.0" ]
+[ "$(./agent-temporary version)" = "agent-temporary 0.7.1" ]
 for ttl in 5m 30m 1h 8h; do ./agent-temporary --validate-ttl "$ttl" >/dev/null; done
 for ttl in 0 4m 9h -1m forever 30x; do
     if ./agent-temporary --validate-ttl "$ttl" >/dev/null 2>&1; then exit 1; fi

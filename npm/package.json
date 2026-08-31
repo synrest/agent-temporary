@@ -1,6 +1,6 @@
 {
   "name": "agent-temporary",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Unprivileged setup layer for the agent-temporary system release",
   "bin": {
     "agent-temporary-setup": "bin/agent-temporary-setup.js"

@@ -34,12 +34,13 @@ privileges; they do not activate temporary access. To update the setup package, 
 Users without npm may use the version-pinned shell bootstrap:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/synrest/agent-temporary/v0.7.1/bootstrap/install.sh | sh
-curl -fsSL https://raw.githubusercontent.com/synrest/agent-temporary/v0.7.1/bootstrap/install.sh -o agent-temporary-install.sh
+curl -fsSL https://raw.githubusercontent.com/synrest/agent-temporary/main/bootstrap/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/synrest/agent-temporary/main/bootstrap/install.sh -o agent-temporary-install.sh
 sh agent-temporary-install.sh
 ```
 
-The bootstrap downloads and verifies the matching 0.7.1 release ZIP before
+The bootstrap resolves the latest GitHub Release to a concrete semantic version,
+downloads that exact release ZIP and its checksum, verifies the ZIP before
 delegating system changes to the existing `install.sh`. It does not activate
 temporary access. Inspect the downloaded script before running it when using the
 inspect-first form.

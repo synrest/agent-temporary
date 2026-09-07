@@ -1,0 +1,41 @@
+name: Stage npm package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Build canonical package
+        shell: sh
+        run: |
+          set -eu
+          version=$(node -p "require('./npm/package.json').version")
+          source_version=$(sed -n 's/^VERSION=\([^ ]*\)$/\1/p' agent-temporary | head -n 1)
+          [ -n "$version" ] && [ "$version" = "$source_version" ]
+          printf 'git commit: %s\n' "$(git rev-parse HEAD)"
+          printf 'package version: %s\n' "$version"
+          printf 'npm version: %s\n' "$(npm --version)"
+          printf 'node version: %s\n' "$(node --version)"
+          ./release.sh
+
+      - name: Stage canonical package
+        shell: sh
+        run: |
+          set -eu
+          version=$(node -p "require('./npm/package.json').version")
+          npm stage publish "./dist/agent-temporary-${version}.tgz"

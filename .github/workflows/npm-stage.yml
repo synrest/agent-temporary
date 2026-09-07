@@ -2,6 +2,11 @@ name: Stage npm package
 
 on:
   workflow_dispatch:
+    inputs:
+      release_ref:
+        description: Exact immutable release tag
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -10,32 +15,87 @@ permissions:
 jobs:
   stage:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_REF: ${{ inputs.release_ref }}
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+      - name: Resolve immutable release tag
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -eu
+          printf '%s\n' "$RELEASE_REF" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          release_sha=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" "refs/tags/$RELEASE_REF^{}" | awk 'NR == 1 {print $1}')
+          if [ -z "$release_sha" ]; then
+            release_sha=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" "refs/tags/$RELEASE_REF" | awk 'NR == 1 {print $1}')
+          fi
+          test -n "$release_sha"
+          echo "RELEASE_SHA=$release_sha" >> "$GITHUB_ENV"
+          echo "requested release ref: $RELEASE_REF"
+          echo "resolved release SHA: $release_sha"
 
-      - name: Set up Node 24
+      - name: Check out immutable release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: "22.14.0"
           registry-url: https://registry.npmjs.org
 
-      - name: Build canonical package
-        shell: sh
-        run: |
-          set -eu
-          version=$(node -p "require('./npm/package.json').version")
-          source_version=$(sed -n 's/^VERSION=\([^ ]*\)$/\1/p' agent-temporary | head -n 1)
-          [ -n "$version" ] && [ "$version" = "$source_version" ]
-          printf 'git commit: %s\n' "$(git rev-parse HEAD)"
-          printf 'package version: %s\n' "$version"
-          printf 'npm version: %s\n' "$(npm --version)"
-          printf 'node version: %s\n' "$(node --version)"
-          ./release.sh
+      - name: Use staged-publishing capable npm
+        run: npm install --global npm@11.19.1
 
-      - name: Stage canonical package
-        shell: sh
+      - name: Build and inspect authoritative package
+        shell: bash
         run: |
-          set -eu
-          version=$(node -p "require('./npm/package.json').version")
-          npm stage publish "./dist/agent-temporary-${version}.tgz"
+          set -euo pipefail
+          expected="${RELEASE_REF#v}"
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          git describe --tags --exact-match "$RELEASE_SHA"
+          test -z "$(git status --porcelain)"
+          package_version=$(node -p "require('./npm/package.json').version")
+          source_version=$(sed -n 's/^VERSION=\([^ ]*\)$/\1/p' agent-temporary | head -n 1)
+          test "$package_version" = "$expected"
+          test "$source_version" = "$expected"
+          test "$(node -p "require('./npm/package.json').name")" = "agent-temporary"
+          echo "checked-out git SHA: $(git rev-parse HEAD)"
+          echo "package name: agent-temporary"
+          echo "package version: $package_version"
+          echo "Node version: $(node --version)"
+          echo "npm version: $(npm --version)"
+          ./release.sh
+          package_tgz="dist/agent-temporary-${expected}.tgz"
+          test -f "$package_tgz"
+          package_sha=$(sha256sum "$package_tgz" | awk '{print $1}')
+          echo "PACKAGE_TGZ=$package_tgz" >> "$GITHUB_ENV"
+          echo "PACKAGE_SHA256=$package_sha" >> "$GITHUB_ENV"
+          inspect=$(mktemp -d)
+          trap 'rm -rf "$inspect"' EXIT
+          tar -xzf "$package_tgz" -C "$inspect"
+          test "$(node -p "require('$inspect/package/package.json').name")" = "agent-temporary"
+          test "$(node -p "require('$inspect/package/package.json').version")" = "$expected"
+          test "$(cat "$inspect/package/payload/VERSION")" = "$expected"
+          test -f "$inspect/package/payload/install.sh"
+          test -f "$inspect/package/payload/SHA256SUMS"
+          while read -r digest file; do
+            test -n "$digest"
+            test "$(sha256sum "$inspect/package/payload/$file" | awk '{print $1}')" = "$digest"
+            cmp -s "$inspect/package/payload/$file" "agent-temporary-release-${expected}/$file"
+          done < "$inspect/package/payload/SHA256SUMS"
+          echo "packed TGZ name: $package_tgz"
+          echo "packed TGZ SHA-256: $package_sha"
+
+      - name: Stage package for human approval
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "requested release ref: $RELEASE_REF"
+          echo "resolved git SHA: $RELEASE_SHA"
+          echo "checked-out git SHA: $(git rev-parse HEAD)"
+          echo "package version: $(node -p "require('./npm/package.json').version")"
+          echo "packed TGZ name: $PACKAGE_TGZ"
+          echo "packed TGZ SHA-256: $PACKAGE_SHA256"
+          npm stage publish "./$PACKAGE_TGZ"

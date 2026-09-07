@@ -25,11 +25,10 @@ Revocation is local; no remote controller is required.
 Preferred distribution with npm:
 
 ```sh
-npm install -g agent-temporary
-agent-temporary-setup install
+npm install -g agent-temporary && agent-temporary-setup install
 ```
 
-The npm installation is unprivileged. `agent-temporary-setup install` is the explicit privileged system installation and leaves temporary access inactive. It can install a fresh system, upgrade an older one, or report that the installed version is already current. A newer installed version is not silently downgraded.
+Run this as the normal user. The first operation installs or updates the unprivileged npm distribution package; only if it succeeds does `agent-temporary-setup install` verify that packaged release and request administrator privileges for the system installation. The same command is used for a first installation and future updates, and leaves temporary access inactive. Running only `npm install -g agent-temporary` does not update an existing system installation. A newer installed system version is not silently downgraded.
 
 To remove the system installation:
 

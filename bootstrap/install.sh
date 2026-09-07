@@ -71,5 +71,5 @@ install_script=$release_dir/install.sh
 [ "$(cat "$release_dir/VERSION" 2>/dev/null || true)" = "$version" ] || die 'release version mismatch'
 
 echo "Installing agent-temporary $version system components."
-echo 'The canonical installer will request administrator privileges; temporary access remains inactive.'
-sh "$install_script" "$@"
+echo 'Administrator privileges are required; temporary access remains inactive.'
+sudo sh "$install_script" "$@"

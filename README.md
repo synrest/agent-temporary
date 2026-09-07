@@ -1,6 +1,6 @@
 # agent-temporary
 
-agent-temporary 0.7.1 — small utility for explicitly bounded temporary root access on Linux or macOS.
+agent-temporary 0.7.2 — small utility for explicitly bounded temporary root access on Linux or macOS.
 
 ## Contract
 

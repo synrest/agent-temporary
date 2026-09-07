@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION=0.7.2
+VERSION=0.7.3
 RULE=${AGENT_TEMPORARY_RULE:-/etc/sudoers.d/90-agent-temporary}
 STATE_DIR=${AGENT_TEMPORARY_STATE_DIR:-/var/db/agent-temporary}
 STATE=${AGENT_TEMPORARY_STATE:-$STATE_DIR/state}
@@ -31,7 +31,21 @@ REAPER_LOCK_ATTEMPTS=${REAPER_LOCK_ATTEMPTS:-100}
 REAPER_LOCK_SLEEP=${REAPER_LOCK_SLEEP:-0.1}
 
 die() { echo "agent-temporary: $*" >&2; exit 1; }
-usage() { echo "usage: agent-temporary-macos on [--ttl MINUTESm|HOURSh] [--persist-reboot] | off | status | --reaper | --boot-revoke" >&2; exit 2; }
+public_help() {
+    cat <<'EOF'
+Usage:
+  agent-temporary status
+  sudo agent-temporary on [--ttl <duration>] [--persist-reboot]
+  sudo agent-temporary off
+
+Options:
+  --ttl <duration>  Temporary access duration (5m–8h, default: 5m)
+  --persist-reboot  Keep access across reboot until expiry
+  --version         Show version
+  --help, -h        Show help
+EOF
+}
+usage() { public_help >&2; exit 2; }
 
 require_root() { [ "$($ID -u 2>/dev/null)" = 0 ] || die "root is required"; }
 
@@ -47,6 +61,10 @@ load_user() {
 }
 
 now() { "$DATE" +%s; }
+human_expiry() {
+    formatted=$("$DATE" -r "$1" '+%b %-d, %-I:%M %p' 2>/dev/null) || return 1
+    printf '%s\n' "$formatted"
+}
 boot_identity() {
     raw=$("$SYSCTL" -n kern.boottime 2>/dev/null) || return 1
     sec=$(printf '%s\n' "$raw" | sed -n 's/.*{[[:space:]]*sec[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' | sed -n '1p')
@@ -201,10 +219,10 @@ classify_before_on() {
 }
 
 on_cmd() {
-    require_root; load_user; ttl=300; REQUESTED_PERSIST=no
+    require_root; load_user; ttl=300; ttl_text=5m; REQUESTED_PERSIST=no
     while [ "$#" -gt 0 ]; do
         case $1 in
-            --ttl) [ "$#" -ge 2 ] || usage; ttl=$(parse_ttl "$2") || exit 1; shift 2;;
+            --ttl) [ "$#" -ge 2 ] || usage; ttl_text=$2; ttl=$(parse_ttl "$2") || exit 1; shift 2;;
             --persist-reboot) [ "$REQUESTED_PERSIST" = no ] || usage; REQUESTED_PERSIST=yes; shift;;
             *) usage;;
         esac
@@ -219,7 +237,10 @@ on_cmd() {
     exact_probe "$TARGET_USER" >/dev/null 2>&1 || { rollback; release_lock; die "exact authority probe failed"; }
     write_state active "$TARGET_USER" "$started" "$expires" "$boot" "$REQUESTED_PERSIST" || { rollback; release_lock; die "cannot commit active state"; }
     kick_reaper || { rollback; release_lock; die "expiry launchd job is not ready"; }
-    echo "Temporary agent access enabled for $TARGET_USER until epoch $expires."
+    expiry_text=$(human_expiry "$expires" 2>/dev/null || printf 'local time unavailable')
+    echo "Temporary access enabled for $TARGET_USER for $ttl_text."
+    echo "Expires: $expiry_text"
+    if [ "$REQUESTED_PERSIST" = yes ]; then echo 'Reboot:  persists'; else echo 'Reboot:  revoke'; fi
 }
 
 status_cmd() {
@@ -245,7 +266,7 @@ status_cmd() {
 off_cmd() {
     require_root; user=${AGENT_TEMPORARY_USER:-}; [ -f "$STATE" ] && user=$(state_value user 2>/dev/null || printf '%s' "$user"); acquire_lock_wait
     revoke_locked "$user" || { release_lock; die "revocation validation or exact probe failed"; }
-    echo 'Temporary agent access disabled.'
+    echo 'Temporary access revoked.'
 }
 
 reaper_cmd() {
@@ -282,6 +303,7 @@ boot_reconcile_cmd() {
 }
 
 case ${1:-} in
+    help|--help|-h) [ "$#" -eq 1 ] || usage; public_help;;
     on) shift; on_cmd "$@";;
     off) shift; [ "$#" -eq 0 ] || usage; off_cmd;;
     status) shift; [ "$#" -eq 0 ] || usage; status_cmd;;

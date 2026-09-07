@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION=0.7.2
+VERSION=0.7.3
 DEFAULT_TTL=5m
 PREFIX=${PREFIX:-/usr/local/bin}
 TARGET=${TARGET:-$PREFIX/agent-temporary}
@@ -23,7 +23,31 @@ UNAME=${UNAME:-uname}
 
 OS=$($UNAME -s 2>/dev/null || true)
 
-usage() { echo "Usage: sudo $0 {install --user USER|on --ttl DURATION|off|status [--json]|version}" >&2; exit 2; }
+public_help() {
+    cat <<'EOF'
+Usage:
+  agent-temporary status
+  sudo agent-temporary on [--ttl <duration>] [--persist-reboot]
+  sudo agent-temporary off
+
+Options:
+  --ttl <duration>  Temporary access duration (5m–8h, default: 5m)
+  --persist-reboot  Keep access across reboot until expiry
+  --version         Show version
+  --help, -h        Show help
+EOF
+}
+usage() { public_help >&2; exit 2; }
+install_guidance() {
+    cat <<'EOF'
+
+Start temporary access:
+  sudo agent-temporary on --ttl 30m
+
+Check status:
+  agent-temporary status
+EOF
+}
 need_root() { [ "$(id -u)" -eq 0 ] || { echo "Run as root: sudo $0 $*" >&2; exit 1; }; }
 die() { echo "agent-temporary: $*" >&2; exit 1; }
 version() { echo "agent-temporary $VERSION"; }
@@ -157,6 +181,7 @@ do_install() {
     service_stop agent-temporary-expire
     validate_sudoers
     echo "Installed $TARGET version $VERSION for user $target_user; temporary access is inactive."
+    install_guidance
 }
 
 macos_plist_lint() {
@@ -206,6 +231,7 @@ do_install_macos() {
     launchctl print system/com.agent-temporary.boot >/dev/null 2>&1 || die "boot launchd job is not loaded"
     "$VISUDO" -cf "$SUDOERS" >/dev/null || die "sudoers validation failed after installation"
     echo "Installed $TARGET version $VERSION for user $target_user; temporary access is inactive."
+    install_guidance
 }
 
 do_on() {
@@ -300,16 +326,19 @@ do_status() {
 }
 
 if [ "$OS" = Darwin ]; then
-    case "${1:-status}" in
+    case "${1:-}" in
+        help|--help|-h) [ "$#" -eq 1 ] || usage; public_help; exit 0 ;;
         install) shift; INSTALL_USER=; [ "${1:-}" = --user ] && { [ "$#" -eq 2 ] || usage; INSTALL_USER=$2; }; do_install_macos ;;
-        version) [ "$#" -eq 1 ] || usage; echo "agent-temporary $VERSION" ;;
+        version|--version) [ "$#" -eq 1 ] || usage; echo "agent-temporary $VERSION" ;;
         --validate-ttl) [ "$#" -eq 2 ] || usage; parse_ttl "$2" >/dev/null; echo valid ;;
-        *) exec /usr/local/libexec/agent-temporary-macos "$@" ;;
+        on|off|status) exec /usr/local/libexec/agent-temporary-macos "$@" ;;
+        *) usage ;;
     esac
     exit 0
 fi
 
 case "${1:-status}" in
+    help|--help|-h) [ "$#" -eq 1 ] || usage; public_help ;;
     on) shift; do_on "$@" ;; off) do_off ;; status)
         shift; STATUS_JSON=no
         if [ "$#" -eq 1 ] && [ "$1" = --json ]; then STATUS_JSON=yes

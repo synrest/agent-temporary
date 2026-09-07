@@ -5,7 +5,7 @@ TMP=$(mktemp -d /tmp/agent-temporary-m2.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 fake_id() { [ "$1" = -u ] && { echo 0; return 0; }; return 0; }
-fake_date() { echo "${FAKE_NOW:-1788740000}"; }
+fake_date() { [ "${1:-}" = +%s ] && echo "${FAKE_NOW:-1788740000}" || echo 'Sep 6, 10:24 PM'; }
 fake_sysctl() { echo '{ sec = 1788047880, usec = 142950 } Sat Aug 29 18:58:00 2026'; }
 fake_visudo() { return 0; }
 fake_probe() { [ -e "$FAKE_RULE" ] && [ "$FAKE_PROBE_MODE" = ok ]; }
@@ -22,7 +22,7 @@ setup() {
     PROBE=$CASE/probe; LAUNCHCTL=$CASE/launchctl; MKTEMP=$CASE/mktemp
     CHOWN=$CASE/chown; MV=$CASE/mv; MKDIR=$CASE/mkdir
     printf '%s\n' '#!/bin/sh' '[ "$1" = -u ] && { echo 0; exit 0; }' 'exit 0' >"$ID"
-    printf '%s\n' 'echo "${FAKE_NOW:-1788740000}"' >"$DATE"
+    printf '%s\n' 'if [ "${1:-}" = +%s ]; then echo "${FAKE_NOW:-1788740000}"; else echo "Sep 6, 10:24 PM"; fi' >"$DATE"
     printf '%s\n' 'echo "{ sec = 1788047880, usec = 142950 } Sat Aug 29 18:58:00 2026"' >"$SYSCTL"
     printf '%s\n' '#!/bin/sh' 'exit 0' >"$CHOWN"
     printf '%s\n' '#!/bin/sh' 'exec /bin/mv "$@"' >"$MV"
@@ -62,12 +62,16 @@ absent() { [ ! -e "$RULE" ] && [ ! -e "$STATE_DIR/state" ]; }
 set_state() { awk -v k="$1" -v v="$2" 'index($0,k "=")==1 {$0=k "=" v} {print}' "$STATE_DIR/state" >"$CASE/state.new"; mv "$CASE/state.new" "$STATE_DIR/state"; }
 
 setup activation
-run on --ttl 50m >/dev/null; grep -qx 'phase=active' "$STATE_DIR/state"; grep -qx 'persist_reboot=no' "$STATE_DIR/state"
+run on --ttl 50m >"$CASE/on"; grep -qx 'phase=active' "$STATE_DIR/state"; grep -qx 'persist_reboot=no' "$STATE_DIR/state"
+grep -qx 'Temporary access enabled for alice for 50m.' "$CASE/on"
+grep -qx 'Expires: Sep 6, 10:24 PM' "$CASE/on"
+grep -qx 'Reboot:  revoke' "$CASE/on"
+! grep -q 'until epoch' "$CASE/on"
 issued=$(sed -n 's/^issued_at=//p' "$STATE_DIR/state"); expires=$(sed -n 's/^expires_at=//p' "$STATE_DIR/state")
 run on --ttl 8h >"$CASE/repeat"; grep -q 'already active' "$CASE/repeat"
 [ "$(sed -n 's/^issued_at=//p' "$STATE_DIR/state")" = "$issued" ]; [ "$(sed -n 's/^expires_at=//p' "$STATE_DIR/state")" = "$expires" ]
 if run_external on --ttl 8h --persist-reboot >/dev/null 2>&1; then exit 1; fi
-run off >/dev/null; absent
+run off >"$CASE/off"; grep -qx 'Temporary access revoked.' "$CASE/off"; absent
 
 setup persistence
 run on --ttl 50m --persist-reboot >/dev/null; expires=$(sed -n 's/^expires_at=//p' "$STATE_DIR/state")

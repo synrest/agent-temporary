@@ -1,18 +1,17 @@
 # agent-temporary
 
-agent-temporary 0.7.2 — small utility for explicitly bounded temporary root access on Linux or macOS.
+agent-temporary 0.7.3 — small utility for explicitly bounded temporary root access on Linux or macOS.
 
 ## Contract
 
 ```text
-sudo agent-temporary install --user zero
+sudo agent-temporary install --user <target-user>
 sudo agent-temporary on
 sudo agent-temporary on --ttl 30m
 sudo agent-temporary on --ttl 2h --persist-reboot
 sudo agent-temporary off
 agent-temporary status
-agent-temporary version
-sudo ./uninstall.sh
+agent-temporary --version
 ```
 
 The npm distribution installs only an unprivileged setup command:
@@ -21,15 +20,16 @@ The npm distribution installs only an unprivileged setup command:
 npm install -g agent-temporary
 agent-temporary-setup install
 agent-temporary status
-agent-temporary-setup update
+agent-temporary-setup uninstall
 npm uninstall -g agent-temporary
-agent-temporary-setup uninstall-system
 ```
 
 `npm install` and `npm uninstall` affect only the npm package. The explicit setup
 commands invoke the existing system installer or uninstaller and request administrator
 privileges; they do not activate temporary access. To update the setup package, use
-`npm install -g agent-temporary@latest` and then run `agent-temporary-setup update`.
+`npm install -g agent-temporary@latest` and then run `agent-temporary-setup install`.
+Removing the npm package with `npm uninstall` does not remove the system installation;
+use `agent-temporary-setup uninstall` for that explicit privileged operation.
 
 Users without npm may use the version-pinned shell bootstrap:
 
@@ -60,8 +60,10 @@ remote controller to revoke access.
 
 `status` reports state from local state/rule inspection and an exact harmless
 `sudo -n /usr/bin/true` execution probe; sudo policy listing alone is not treated
-as effective authority. `status --json` is accepted for machine-readable integration
-(the key/value fields remain stable). State is stored root-owned under
+as effective authority. The stable key/value fields are intended for machine-readable
+integration. On macOS, inspecting protected active state requires
+`sudo agent-temporary status`; inactive status can be checked without privilege.
+State is stored root-owned under
 `/var/lib/agent-temporary/`.
 
 ## Platform
@@ -85,4 +87,4 @@ The resulting directory contains the executable, systemd/OpenRC/launchd service 
 `SHA256SUMS`, and a deterministic `install.sh`. It also creates
 `dist/agent-temporary-X.Y.Z.zip` and its SHA-256 sidecar. The archive contains no Git metadata,
 runtime state, logs, or private material; after extraction, run
-`sudo ./install.sh --user zero` and the extracted source directory may be removed.
+`sudo ./install.sh --user <target-user>` and the extracted source directory may be removed.

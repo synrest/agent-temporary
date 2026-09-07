@@ -19,9 +19,7 @@ function fail(message) {
 function usage() {
   process.stdout.write('Usage:\n' +
     '  agent-temporary-setup install\n' +
-    '  agent-temporary-setup update\n' +
-    '  agent-temporary-setup status\n' +
-    '  agent-temporary-setup uninstall-system\n');
+    '  agent-temporary-setup uninstall\n');
 }
 
 function versionParts(value) {
@@ -92,28 +90,12 @@ function verifyInactive() {
   }
 }
 
-function doStatus() {
-  const system = installedSystem();
-  process.stdout.write(`npm/package version=${pkg.version}\n`);
-  process.stdout.write(`embedded payload version=${pkg.version}\n`);
-  process.stdout.write(`system components=${system.present ? 'present' : 'absent/unknown'}\n`);
-  process.stdout.write(`installed system version=${system.version || 'unknown'}\n`);
-  if (!system.present) process.stdout.write('update available=no (system installation not detected)\n');
-  else {
-    const comparison = compareVersions(system.version, pkg.version);
-    if (comparison === null) process.stdout.write('update available=unknown\n');
-    else if (comparison < 0) process.stdout.write('update available=yes\n');
-    else process.stdout.write('update available=no\n');
-  }
-}
-
-function installOrUpdate(command) {
+function install() {
   verifyPayload();
   const system = installedSystem();
   const comparison = system.version ? compareVersions(system.version, pkg.version) : null;
   if (system.present && comparison === null) throw new Error('installed system version is unknown; refusing ambiguous installation');
   if (comparison > 0) throw new Error(`installed system version ${system.version} is newer than package version ${pkg.version}; downgrade is not supported`);
-  if (command === 'update' && !system.present) throw new Error('no installed system detected; use install');
   if (comparison === 0) {
     process.stdout.write(`agent-temporary ${pkg.version} is already current; no system changes made.\n`);
     return;
@@ -127,7 +109,7 @@ function installOrUpdate(command) {
   process.stdout.write(`agent-temporary ${pkg.version} system installation is present and inactive.\n`);
 }
 
-function uninstallSystem() {
+function uninstall() {
   verifyPayload();
   process.stdout.write('Removing agent-temporary system components. Administrator privileges are required.\n');
   const result = runSudo(['sh', path.join(payload, 'uninstall.sh')]);
@@ -142,15 +124,14 @@ function main() {
   if (!command) return usage();
   if (command === '--help' || command === '-h') return usage();
   if (command === '--version') return process.stdout.write(`agent-temporary-setup ${pkg.version}\n`);
-  if (!['status', 'install', 'update', 'uninstall-system'].includes(command)) {
+  if (!['install', 'uninstall'].includes(command)) {
     usage();
     process.exitCode = 2;
     return;
   }
   try {
-    if (command === 'status') doStatus();
-    else if (command === 'uninstall-system') uninstallSystem();
-    else installOrUpdate(command);
+    if (command === 'uninstall') uninstall();
+    else install();
   } catch (error) {
     fail(error.message);
   }

@@ -2,7 +2,15 @@
 set -eu
 cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 sh -n agent-temporary release.sh
-[ "$(./agent-temporary version)" = "agent-temporary 0.7.2" ]
+[ "$(./agent-temporary version)" = "agent-temporary 0.7.3" ]
+help_tmp=$(mktemp)
+trap 'rm -f "$help_tmp"' EXIT HUP INT TERM
+./agent-temporary --help >"$help_tmp"
+grep -q '^Usage:$' "$help_tmp"
+grep -q 'sudo agent-temporary on' "$help_tmp"
+! grep -q 'agent-temporary-macos\|--reaper\|--boot-revoke' "$help_tmp"
+./agent-temporary -h >/dev/null
+if ./agent-temporary -help >/dev/null 2>&1; then exit 1; fi
 for ttl in 5m 30m 1h 8h; do ./agent-temporary --validate-ttl "$ttl" >/dev/null; done
 for ttl in 0 4m 9h -1m forever 30x; do
     if ./agent-temporary --validate-ttl "$ttl" >/dev/null 2>&1; then exit 1; fi
@@ -21,8 +29,11 @@ grep -q 'true_command=' agent-temporary
 grep -q 'supervisor="supervise-daemon"' agent-temporary-expire.openrc
 grep -q 'respawn_delay=30' agent-temporary-expire.openrc
 ! grep -q 'sudo -n -l -U' agent-temporary
-grep -q 'status.*--json' agent-temporary
-grep -q 'install.*--user' agent-temporary
+grep -q 'STATUS_JSON' agent-temporary
+grep -q 'Start temporary access:' agent-temporary
+grep -q 'sudo agent-temporary on --ttl 30m' agent-temporary
+grep -q 'agent-temporary status' agent-temporary
+grep -q 'install)' agent-temporary
 test -x uninstall.sh
 ! grep -q 'respawn_delay=60' agent-temporary-expire.openrc
 legacy_tmp=$(mktemp -d /tmp/agent-temporary-uninstall.XXXXXX)

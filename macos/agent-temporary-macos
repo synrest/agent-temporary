@@ -252,7 +252,7 @@ status_cmd() {
         echo 'detail=root privileges are required to inspect effective temporary sudo state'
         return 0
     fi
-    acquire_lock
+    acquire_lock_wait
     if [ ! -e "$RULE" ] && [ ! -e "$STATE" ]; then echo 'state=inactive'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0; fi
     if ! valid_state; then remove_rule; clear_state; validate_full || true; echo 'state=inconsistent'; echo 'detail=orphan-or-invalid-authority'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0; fi
     user=$(state_value user); expires=$(state_value expires_at)

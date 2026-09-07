@@ -50,6 +50,7 @@ run() {
     case "$1" in
         on) shift; on_cmd "$@";;
         off) off_cmd;;
+        status) status_cmd;;
         --boot-revoke) boot_reconcile_cmd;;
         *) return 2;;
     esac
@@ -67,6 +68,7 @@ grep -qx 'Temporary access enabled for alice for 50m.' "$CASE/on"
 grep -qx 'Expires: Sep 6, 10:24 PM' "$CASE/on"
 grep -qx 'Reboot:  revoke' "$CASE/on"
 ! grep -q 'until epoch' "$CASE/on"
+run status >"$CASE/status"; grep -qx 'state=active' "$CASE/status"; grep -qx 'effective_authority=true' "$CASE/status"
 issued=$(sed -n 's/^issued_at=//p' "$STATE_DIR/state"); expires=$(sed -n 's/^expires_at=//p' "$STATE_DIR/state")
 run on --ttl 8h >"$CASE/repeat"; grep -q 'already active' "$CASE/repeat"
 [ "$(sed -n 's/^issued_at=//p' "$STATE_DIR/state")" = "$issued" ]; [ "$(sed -n 's/^expires_at=//p' "$STATE_DIR/state")" = "$expires" ]

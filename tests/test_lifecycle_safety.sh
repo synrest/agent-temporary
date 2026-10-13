@@ -57,7 +57,9 @@ run on --ttl 5m
 first_expires=$(sed -n 's/^expires_at_epoch=//p' "$STATE")
 first_activated=$(sed -n 's/^activated_at_epoch=//p' "$STATE")
 FAKE_NOW=1789000001 run on --ttl 8h >"$TMP/repeat"
-grep -q 'already active; expires_at_epoch=' "$TMP/repeat"
+grep -q '^Temporary access already active; no changes made\.$' "$TMP/repeat"
+grep -q '^Expires: ' "$TMP/repeat"
+grep -q '^Reboot:  revoke$' "$TMP/repeat"
 [ "$(sed -n 's/^expires_at_epoch=//p' "$STATE")" = "$first_expires" ]
 
 if FAKE_LOCK_BUSY=yes run on --ttl 5m >/dev/null 2>&1; then exit 1; fi

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION=0.7.5
+VERSION=0.7.6
 DEFAULT_TTL=5m
 PREFIX=${PREFIX:-/usr/local/bin}
 TARGET=${TARGET:-$PREFIX/agent-temporary}
@@ -147,6 +147,12 @@ write_state() {
 
 state_value() { sed -n "s/^$1=//p" "$STATE" | head -n 1; }
 
+human_expiry() {
+    date -d "@$1" '+%b %-d, %-I:%M %p' 2>/dev/null ||
+    date -d "@$1" '+%b %e, %l:%M %p' 2>/dev/null ||
+    printf '%s\n' 'local time unavailable'
+}
+
 lock_trap() { trap release_lock EXIT INT TERM; }
 acquire_lock() {
     install -d -m 700 "$STATE_DIR"
@@ -266,7 +272,12 @@ do_on() {
     if [ -f "$STATE" ]; then
         expires=$(state_value expires_at_epoch); now=$(date +%s)
         if [ -n "$expires" ] && [ "$now" -lt "$expires" ] && effective_unrestricted "$AGENT_USER"; then
-            echo "already active; expires_at_epoch=$expires; no changes made."; exit 0
+            expiry_text=$(human_expiry "$expires")
+            echo 'Temporary access already active; no changes made.'
+            echo "Expires: $expiry_text"
+            existing_persist=$(state_value persist_reboot); [ "$existing_persist" = yes ] || existing_persist=no
+            if [ "$existing_persist" = yes ]; then echo 'Reboot:  persists'; else echo 'Reboot:  revoke'; fi
+            exit 0
         fi
         if [ -n "$expires" ] && [ "$now" -ge "$expires" ] && [ ! -e "$RULE" ]; then
             rm -f "$STATE"
@@ -285,7 +296,9 @@ do_on() {
         remove_managed || true
         die "exact authority probe failed; privilege was revoked"
     fi
-    echo "Temporary agent sudo access enabled for $AGENT_USER until epoch $expires."
+    echo "Temporary access enabled for $AGENT_USER for $ttl_text."
+    echo "Expires: $(human_expiry "$expires")"
+    if [ "$persist_reboot" = yes ]; then echo 'Reboot:  persists'; else echo 'Reboot:  revoke'; fi
 }
 
 do_off() {
@@ -293,7 +306,7 @@ do_off() {
     service_stop agent-temporary-expire
     validate_sudoers
     if effective_unrestricted "$AGENT_USER"; then die "effective temporary privilege remains after revoke"; fi
-    echo "Temporary agent sudo access disabled."
+    echo "Temporary access revoked."
 }
 
 do_expire() {

@@ -141,8 +141,8 @@ acquire_lock_wait() {
     trap release_lock EXIT INT TERM
 }
 release_lock() { "$RMDIR" "$LOCK" 2>/dev/null || true; trap - EXIT INT TERM; }
-remove_rule() { [ -e "$RULE" ] && "$RM" -f "$RULE"; }
-clear_state() { [ -e "$STATE" ] && "$RM" -f "$STATE"; }
+remove_rule() { [ ! -e "$RULE" ] || "$RM" -f "$RULE"; [ ! -e "$RULE" ]; }
+clear_state() { [ ! -e "$STATE" ] || "$RM" -f "$STATE"; [ ! -e "$STATE" ]; }
 validate_full() { "$VISUDO" -cf "$SUDOERS" >/dev/null 2>&1; }
 
 exact_probe() {
@@ -188,26 +188,30 @@ write_candidate() {
 }
 
 rollback() {
-    [ -n "${CANDIDATE:-}" ] && "$RM" -f "$CANDIDATE" 2>/dev/null || true
-    remove_rule; clear_state; validate_full || true
+    rollback_failed=0
+    if [ -n "${CANDIDATE:-}" ]; then "$RM" -f "$CANDIDATE" 2>/dev/null || rollback_failed=1; fi
+    remove_rule || rollback_failed=1
+    clear_state || rollback_failed=1
+    validate_full || rollback_failed=1
+    [ "$rollback_failed" -eq 0 ]
 }
 
 revoke_locked() {
-    user=${1:-}; validation_failed=0
-    remove_rule
+    user=${1:-}; removal_failed=0; state_failed=0; validation_failed=0
+    remove_rule || removal_failed=1
     validate_full || validation_failed=1
-    clear_state
+    [ "$removal_failed" -eq 0 ] && { clear_state || state_failed=1; }
     if [ -n "$user" ] && exact_probe "$user" >/dev/null 2>&1; then probe_failed=1; else probe_failed=0; fi
-    [ "$validation_failed" = 0 ] && [ "$probe_failed" = 0 ]
+    [ "$removal_failed" = 0 ] && [ "$state_failed" = 0 ] && [ "$validation_failed" = 0 ] && [ "$probe_failed" = 0 ]
 }
 
 classify_before_on() {
-    if [ -e "$RULE" ] && ! valid_state; then revoke_locked "${TARGET_USER:-}" || true; return 0; fi
-    if [ -f "$STATE" ] && [ ! -e "$RULE" ]; then clear_state; return 0; fi
+    if [ -e "$RULE" ] && ! valid_state; then revoke_locked "${TARGET_USER:-}" || die "cannot revoke invalid managed authority"; return 0; fi
+    if [ -f "$STATE" ] && [ ! -e "$RULE" ]; then clear_state || die "cannot clear orphaned state"; return 0; fi
     if valid_state; then
         phase=$(state_value phase); expires=$(state_value expires_at); existing_persist=$(state_value persist_reboot)
         if [ "$phase" != active ] || [ "$expires" -le "$(now)" ]; then
-            revoke_locked "$(state_value user)" || true
+            revoke_locked "$(state_value user)" || die "cannot revoke expired managed authority"
         elif [ -e "$RULE" ]; then
             if exact_probe "$(state_value user)" >/dev/null 2>&1 && daemon_running; then
                 [ "$existing_persist" = "$REQUESTED_PERSIST" ] || die "already active; run off before changing persistence"
@@ -217,7 +221,7 @@ classify_before_on() {
                 if [ "$existing_persist" = yes ]; then echo 'Reboot:  persists'; else echo 'Reboot:  revoke'; fi
                 exit 0
             fi
-            revoke_locked "$(state_value user)" || true
+            revoke_locked "$(state_value user)" || die "cannot revoke inconsistent managed authority"
         fi
     fi
 }
@@ -258,12 +262,29 @@ status_cmd() {
     fi
     acquire_lock_wait
     if [ ! -e "$RULE" ] && [ ! -e "$STATE" ]; then echo 'state=inactive'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0; fi
-    if ! valid_state; then remove_rule; clear_state; validate_full || true; echo 'state=inconsistent'; echo 'detail=orphan-or-invalid-authority'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0; fi
+    if ! valid_state; then
+        if revoke_locked "$(state_value user 2>/dev/null || true)"; then
+            echo 'state=inconsistent'; echo 'detail=orphan-or-invalid-authority'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0
+        fi
+        echo 'state=inconsistent'; echo 'status=security-error'; echo 'detail=revocation-failed'; echo 'effective_authority=unknown'; echo "version=$VERSION"; return 1
+    fi
     user=$(state_value user); expires=$(state_value expires_at)
-    if [ ! -e "$RULE" ]; then clear_state; echo 'state=inconsistent'; echo 'detail=state-without-authority'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0; fi
-    if [ "$expires" -le "$(now)" ]; then revoke_locked "$user" || true; echo 'state=expired'; echo 'effective_authority=false'; echo "expires_at=$expires"; echo "version=$VERSION"; return 0; fi
-    if ! daemon_running; then revoke_locked "$user" || true; echo 'state=inconsistent'; echo 'detail=reaper-unavailable'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0; fi
-    if ! exact_probe "$user" >/dev/null 2>&1; then revoke_locked "$user" || true; echo 'state=inconsistent'; echo 'detail=effective-authority-failed'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0; fi
+    if [ ! -e "$RULE" ]; then
+        if ! clear_state; then echo 'state=inconsistent'; echo 'status=security-error'; echo 'detail=state-cleanup-failed'; echo 'effective_authority=unknown'; echo "version=$VERSION"; return 1; fi
+        echo 'state=inconsistent'; echo 'detail=state-without-authority'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0
+    fi
+    if [ "$expires" -le "$(now)" ]; then
+        if revoke_locked "$user"; then echo 'state=expired'; echo 'effective_authority=false'; echo "expires_at=$expires"; echo "version=$VERSION"; return 0; fi
+        echo 'state=expired'; echo 'status=security-error'; echo 'detail=revocation-failed'; echo 'effective_authority=unknown'; echo "version=$VERSION"; return 1
+    fi
+    if ! daemon_running; then
+        if revoke_locked "$user"; then echo 'state=inconsistent'; echo 'detail=reaper-unavailable'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0; fi
+        echo 'state=inconsistent'; echo 'status=security-error'; echo 'detail=revocation-failed'; echo 'effective_authority=unknown'; echo "version=$VERSION"; return 1
+    fi
+    if ! exact_probe "$user" >/dev/null 2>&1; then
+        if revoke_locked "$user"; then echo 'state=inconsistent'; echo 'detail=effective-authority-failed'; echo 'effective_authority=false'; echo "version=$VERSION"; return 0; fi
+        echo 'state=inconsistent'; echo 'status=security-error'; echo 'detail=revocation-failed'; echo 'effective_authority=unknown'; echo "version=$VERSION"; return 1
+    fi
     echo 'state=active'; echo 'effective_authority=true'; echo "user=$user"; echo "issued_at=$(state_value issued_at)"; echo "expires_at=$expires"; echo "remaining_seconds=$((expires - $(now)))"; echo "persist_reboot=$(state_value persist_reboot)"; echo "version=$VERSION"
 }
 
@@ -275,26 +296,32 @@ off_cmd() {
 
 reaper_cmd() {
     require_root; acquire_lock_wait
-    if ! valid_state || [ ! -e "$RULE" ]; then revoke_locked "$(state_value user 2>/dev/null || true)" || true; release_lock; exit 0; fi
-    user=$(state_value user); expires=$(state_value expires_at); boot=$(state_value boot_identity); current_boot=$(boot_identity)
-    if [ "$expires" -le "$(now)" ] || [ "$boot" != "$current_boot" ]; then revoke_locked "$user" || true; release_lock; exit 0; fi
+    if ! valid_state || [ ! -e "$RULE" ]; then
+        revoke_locked "$(state_value user 2>/dev/null || true)" || { release_lock; exit 1; }
+        release_lock; exit 0
+    fi
+    user=$(state_value user); issued=$(state_value issued_at); expires=$(state_value expires_at); boot=$(state_value boot_identity); current_boot=$(boot_identity); current_now=$(now)
+    if [ "$current_now" -lt "$issued" ] || [ "$current_now" -ge "$expires" ] || [ "$boot" != "$current_boot" ]; then
+        revoke_locked "$user" || { release_lock; exit 1; }
+        release_lock; exit 0
+    fi
     release_lock
     while :; do
         [ -f "$STATE" ] && [ -e "$RULE" ] || exit 0
-        [ "$(now)" -ge "$expires" ] && { acquire_lock; revoke_locked "$user" || true; release_lock; exit 0; }
+        [ "$(now)" -ge "$expires" ] && { acquire_lock; revoke_locked "$user" || { release_lock; exit 1; }; release_lock; exit 0; }
         sleep 1
     done
 }
 
 boot_reconcile_cmd() {
     require_root; acquire_lock
-    if [ ! -f "$STATE" ]; then remove_rule; validate_full || true; return 0; fi
-    if ! valid_state; then revoke_locked "$(state_value user 2>/dev/null || true)" || true; return 1; fi
+    if [ ! -f "$STATE" ]; then remove_rule && validate_full || return 1; return 0; fi
+    if ! valid_state; then revoke_locked "$(state_value user 2>/dev/null || true)" || return 1; return 0; fi
     phase=$(state_value phase); user=$(state_value user); issued=$(state_value issued_at); expires=$(state_value expires_at); persist=$(state_value persist_reboot); current_boot=$(boot_identity)
     if [ "$phase" != active ] || [ "$persist" != yes ] || [ "$expires" -le "$(now)" ] || [ "$(now)" -lt "$issued" ]; then
-        revoke_locked "$user" || true; return 0
+        revoke_locked "$user" || return 1; return 0
     fi
-    if [ -z "$current_boot" ]; then revoke_locked "$user" || true; return 1; fi
+    if [ -z "$current_boot" ]; then revoke_locked "$user" || return 1; return 1; fi
     CANDIDATE=
     write_candidate "$user" || { rollback; return 1; }
     "$MV" "$CANDIDATE" "$RULE" 2>/dev/null || { rollback; return 1; }

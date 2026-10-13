@@ -35,6 +35,7 @@ setup() {
     FAKE_PROBE_MODE=ok FAKE_LAUNCH_MODE=ok FAKE_MKDIR_FAIL_ONCE=no; export FAKE_PROBE_MODE FAKE_LAUNCH_MODE FAKE_MKDIR_FAIL_ONCE
     sed 's/                exit 0$/                return 0/' "$ROOT/macos/agent-temporary-macos" >"$CASE/backend"
     sed '/^case ${1:-}/,$d; s/                exit 0$/                return 0/' "$ROOT/macos/agent-temporary-macos" >"$CASE/library"
+    chmod 755 "$CASE/backend" "$CASE/library"
     AGENT_TEMPORARY_USER=alice AGENT_TEMPORARY_STATE_DIR="$STATE_DIR" AGENT_TEMPORARY_RULE="$RULE" AGENT_TEMPORARY_SUDOERS="$SUDOERS" AGENT_TEMPORARY_LOCK="$LOCK"
     export AGENT_TEMPORARY_USER AGENT_TEMPORARY_STATE_DIR AGENT_TEMPORARY_RULE AGENT_TEMPORARY_SUDOERS AGENT_TEMPORARY_LOCK
     FAKE_RULE="$RULE"; export FAKE_RULE

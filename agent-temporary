@@ -310,20 +310,39 @@ do_expire() {
 
 do_expire_loop() {
     need_root internal
-    while :; do
+    expire_stop=0
+    expire_loop_stop() { expire_stop=1; }
+    trap expire_loop_stop INT TERM HUP
+    while [ "$expire_stop" -eq 0 ]; do
         acquire_lock
-        [ -f "$STATE" ] || { remove_managed && validate_sudoers || die "expiry cleanup failed"; exit 0; }
+        if [ ! -f "$STATE" ]; then
+            remove_managed && validate_sudoers || die "expiry cleanup failed"
+            release_lock
+            sleep 1
+            continue
+        fi
         activated=$(state_value activated_at_epoch); expires=$(state_value expires_at_epoch); now=$(date +%s)
-        case "$activated:$expires" in *[!0-9:]*|:*) remove_managed && validate_sudoers || die "expiry cleanup failed"; exit 0 ;; esac
+        case "$activated:$expires" in
+            *[!0-9:]*|:*)
+                remove_managed && validate_sudoers || die "expiry cleanup failed"
+                release_lock
+                sleep 1
+                continue
+                ;;
+        esac
         if [ "$now" -lt "$activated" ] || [ "$now" -ge "$expires" ]; then
             AGENT_USER=$(state_value user)
             remove_managed && validate_sudoers || die "expiry cleanup failed"
             effective_unrestricted "$AGENT_USER" && die "effective temporary privilege remains after expiry" || true
-            exit 0
+            release_lock
+            sleep 1
+            continue
         fi
         release_lock
         sleep 1
     done
+    release_lock
+    trap - INT TERM HUP
 }
 
 do_boot_revoke() {

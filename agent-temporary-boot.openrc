@@ -1,8 +1,16 @@
 #!/sbin/openrc-run
 
 name="agent-temporary-boot"
-command="/usr/local/bin/agent-temporary"
-command_args="--internal-boot-revoke"
+
+start() {
+    ebegin "Reconciling agent-temporary authority at boot"
+    /usr/local/bin/agent-temporary --internal-boot-revoke
+    eend $?
+}
+
+stop() {
+    return 0
+}
 
 depend() {
     need localmount

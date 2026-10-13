@@ -17,6 +17,9 @@ printf 'AGENT_USER=alice\n' >"$CONFIG"
 grep -q '^OnBootSec=1s$' "$ROOT/agent-temporary-expire.timer"
 grep -q '^OnUnitActiveSec=1s$' "$ROOT/agent-temporary-expire.timer"
 grep -q '^After=agent-temporary-boot.service$' "$ROOT/agent-temporary-expire.service"
+grep -q '^start() {' "$ROOT/agent-temporary-boot.openrc"
+! grep -q '^command=' "$ROOT/agent-temporary-boot.openrc"
+grep -q 'expire_loop_stop' "$ROOT/agent-temporary"
 
 sed '/^if \[ "$OS" = Darwin \]; then/,$d' "$ROOT/agent-temporary" >"$TMP/library"
 cat >"$TMP/harness" <<'EOF'

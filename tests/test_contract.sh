@@ -2,7 +2,7 @@
 set -eu
 cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 sh -n agent-temporary release.sh
-[ "$(./agent-temporary version)" = "agent-temporary 0.7.3" ]
+[ "$(./agent-temporary version)" = "agent-temporary 0.7.4" ]
 help_tmp=$(mktemp)
 trap 'rm -f "$help_tmp"' EXIT HUP INT TERM
 ./agent-temporary --help >"$help_tmp"

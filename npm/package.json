@@ -1,6 +1,6 @@
 {
   "name": "agent-temporary",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Unprivileged setup layer for the agent-temporary system release",
   "repository": {
     "type": "git",

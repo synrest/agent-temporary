@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION=0.7.3
+VERSION=0.7.4
 RULE=${AGENT_TEMPORARY_RULE:-/etc/sudoers.d/90-agent-temporary}
 STATE_DIR=${AGENT_TEMPORARY_STATE_DIR:-/var/db/agent-temporary}
 STATE=${AGENT_TEMPORARY_STATE:-$STATE_DIR/state}
@@ -211,7 +211,11 @@ classify_before_on() {
         elif [ -e "$RULE" ]; then
             if exact_probe "$(state_value user)" >/dev/null 2>&1 && daemon_running; then
                 [ "$existing_persist" = "$REQUESTED_PERSIST" ] || die "already active; run off before changing persistence"
-                echo "already active; expires_at=$expires; no changes made."; exit 0
+                expiry_text=$(human_expiry "$expires" 2>/dev/null || printf 'local time unavailable')
+                echo 'Temporary access already active; no changes made.'
+                echo "Expires: $expiry_text"
+                if [ "$existing_persist" = yes ]; then echo 'Reboot:  persists'; else echo 'Reboot:  revoke'; fi
+                exit 0
             fi
             revoke_locked "$(state_value user)" || true
         fi

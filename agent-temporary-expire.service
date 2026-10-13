@@ -1,5 +1,7 @@
 [Unit]
 Description=Expire agent-temporary privilege when its local TTL ends
+After=agent-temporary-boot.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

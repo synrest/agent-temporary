@@ -20,6 +20,7 @@ grep -q 'persist_reboot' agent-temporary
 grep -q -- '--persist-reboot' agent-temporary
 grep -q 'agent-temporary-boot.service' agent-temporary
 grep -q 'agent-temporary-expire.timer' agent-temporary
+grep -q '^StartLimitIntervalSec=0$' agent-temporary-expire.service
 grep -q 'agent-temporary-expire.openrc' release.sh
 grep -q 'uninstall.sh' release.sh
 grep -q 'INIT_SYSTEM=openrc' agent-temporary

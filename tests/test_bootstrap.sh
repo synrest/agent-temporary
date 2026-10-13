@@ -11,11 +11,11 @@ SERVER_LOG=$TMP/server.log
 WORK=$TMP/work
 FAKEBIN=$TMP/bin
 LOG=$TMP/bootstrap.log
-mkdir -p "$FIXTURE" "$SERVER_ROOT/releases/download/v0.7.4" "$WORK" "$FAKEBIN"
-cp "$ROOT/dist/agent-temporary-0.7.4.zip" "$FIXTURE/agent-temporary-0.7.4.zip"
-shasum -a 256 "$FIXTURE/agent-temporary-0.7.4.zip" >"$FIXTURE/agent-temporary-0.7.4.zip.sha256"
-cp "$FIXTURE/agent-temporary-0.7.4.zip" "$SERVER_ROOT/releases/download/v0.7.4/"
-cp "$FIXTURE/agent-temporary-0.7.4.zip.sha256" "$SERVER_ROOT/releases/download/v0.7.4/"
+mkdir -p "$FIXTURE" "$SERVER_ROOT/releases/download/v0.7.5" "$WORK" "$FAKEBIN"
+cp "$ROOT/dist/agent-temporary-0.7.5.zip" "$FIXTURE/agent-temporary-0.7.5.zip"
+shasum -a 256 "$FIXTURE/agent-temporary-0.7.5.zip" >"$FIXTURE/agent-temporary-0.7.5.zip.sha256"
+cp "$FIXTURE/agent-temporary-0.7.5.zip" "$SERVER_ROOT/releases/download/v0.7.5/"
+cp "$FIXTURE/agent-temporary-0.7.5.zip.sha256" "$SERVER_ROOT/releases/download/v0.7.5/"
 mkdir "$TMP/empty"
 : >"$TMP/empty/README"
 (cd "$TMP/empty" && zip -q "$FIXTURE/no-installer.zip" README)
@@ -32,7 +32,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/releases/latest":
             self.send_response(302)
-            self.send_header("Location", "/releases/tag/v0.7.4")
+            self.send_header("Location", "/releases/tag/v0.7.5")
             self.end_headers()
             return
         if self.path == "/bad/releases/latest":
@@ -40,7 +40,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Location", "/releases/tag/not-a-version")
             self.end_headers()
             return
-        if self.path in ("/releases/tag/v0.7.4", "/releases/tag/not-a-version"):
+        if self.path in ("/releases/tag/v0.7.5", "/releases/tag/not-a-version"):
             self.send_response(200)
             self.end_headers()
             return
@@ -79,31 +79,31 @@ run() {
 
 run
 grep -q 'GET /releases/latest' "$SERVER_LOG"
-grep -q 'GET /releases/download/v0.7.4/agent-temporary-0.7.4.zip' "$SERVER_LOG"
-grep -q 'GET /releases/download/v0.7.4/agent-temporary-0.7.4.zip.sha256' "$SERVER_LOG"
-grep -q '^sudo sh .*agent-temporary-release-0.7.4/install.sh$' "$LOG"
+grep -q 'GET /releases/download/v0.7.5/agent-temporary-0.7.5.zip' "$SERVER_LOG"
+grep -q 'GET /releases/download/v0.7.5/agent-temporary-0.7.5.zip.sha256' "$SERVER_LOG"
+grep -q '^sudo sh .*agent-temporary-release-0.7.5/install.sh$' "$LOG"
 [ "$(grep -c '^sudo ' "$LOG")" -eq 1 ]
 [ -z "$(find "$WORK" -mindepth 1 -print -prune)" ]
 
-printf '%064d  agent-temporary-0.7.4.zip\n' 0 >"$SERVER_ROOT/releases/download/v0.7.4/agent-temporary-0.7.4.zip.sha256"
+printf '%064d  agent-temporary-0.7.5.zip\n' 0 >"$SERVER_ROOT/releases/download/v0.7.5/agent-temporary-0.7.5.zip.sha256"
 : >"$LOG"
 if run >/dev/null 2>&1; then exit 1; fi
 [ ! -s "$LOG" ]
 [ -z "$(find "$WORK" -mindepth 1 -print -prune)" ]
-cp "$FIXTURE/agent-temporary-0.7.4.zip.sha256" "$SERVER_ROOT/releases/download/v0.7.4/agent-temporary-0.7.4.zip.sha256"
-rm "$SERVER_ROOT/releases/download/v0.7.4/agent-temporary-0.7.4.zip.sha256"
+cp "$FIXTURE/agent-temporary-0.7.5.zip.sha256" "$SERVER_ROOT/releases/download/v0.7.5/agent-temporary-0.7.5.zip.sha256"
+rm "$SERVER_ROOT/releases/download/v0.7.5/agent-temporary-0.7.5.zip.sha256"
 : >"$LOG"
 if run >/dev/null 2>&1; then exit 1; fi
 [ ! -s "$LOG" ]
 [ -z "$(find "$WORK" -mindepth 1 -print -prune)" ]
-cp "$FIXTURE/agent-temporary-0.7.4.zip.sha256" "$SERVER_ROOT/releases/download/v0.7.4/agent-temporary-0.7.4.zip.sha256"
-cp "$FIXTURE/no-installer.zip" "$SERVER_ROOT/releases/download/v0.7.4/agent-temporary-0.7.4.zip"
-cp "$FIXTURE/no-installer.zip.sha256" "$SERVER_ROOT/releases/download/v0.7.4/agent-temporary-0.7.4.zip.sha256"
+cp "$FIXTURE/agent-temporary-0.7.5.zip.sha256" "$SERVER_ROOT/releases/download/v0.7.5/agent-temporary-0.7.5.zip.sha256"
+cp "$FIXTURE/no-installer.zip" "$SERVER_ROOT/releases/download/v0.7.5/agent-temporary-0.7.5.zip"
+cp "$FIXTURE/no-installer.zip.sha256" "$SERVER_ROOT/releases/download/v0.7.5/agent-temporary-0.7.5.zip.sha256"
 : >"$LOG"
 if run >/dev/null 2>&1; then exit 1; fi
 [ ! -s "$LOG" ]
-cp "$FIXTURE/agent-temporary-0.7.4.zip" "$SERVER_ROOT/releases/download/v0.7.4/agent-temporary-0.7.4.zip"
-cp "$FIXTURE/agent-temporary-0.7.4.zip.sha256" "$SERVER_ROOT/releases/download/v0.7.4/agent-temporary-0.7.4.zip.sha256"
+cp "$FIXTURE/agent-temporary-0.7.5.zip" "$SERVER_ROOT/releases/download/v0.7.5/agent-temporary-0.7.5.zip"
+cp "$FIXTURE/agent-temporary-0.7.5.zip.sha256" "$SERVER_ROOT/releases/download/v0.7.5/agent-temporary-0.7.5.zip.sha256"
 
 : >"$LOG"
 if FAKE_INSTALL_EXIT=7 run >/dev/null 2>&1; then exit 1; fi

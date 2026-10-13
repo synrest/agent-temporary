@@ -10,8 +10,9 @@ run_one() { name=$1; shift; ("$@") >"$TMP/$name.log" 2>&1 & }
 run_one contract sh tests/test_contract.sh; contract_pid=$!
 run_one macos sh tests/test_macos_m2.sh; macos_pid=$!
 run_one bootstrap-unit sh tests/test_bootstrap_unit.sh; bootstrap_pid=$!
+run_one lifecycle sh tests/test_lifecycle_safety.sh; lifecycle_pid=$!
 status=0
-for name_pid in 'contract:'"$contract_pid" 'macos:'"$macos_pid" 'bootstrap-unit:'"$bootstrap_pid"; do
+for name_pid in 'contract:'"$contract_pid" 'macos:'"$macos_pid" 'bootstrap-unit:'"$bootstrap_pid" 'lifecycle:'"$lifecycle_pid"; do
     name=${name_pid%%:*}; pid=${name_pid#*:}
     if wait "$pid"; then echo "$name: PASS"; else echo "$name: FAIL"; cat "$TMP/$name.log"; status=1; fi
 done

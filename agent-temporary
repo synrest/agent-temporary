@@ -9,8 +9,10 @@ RULE=${AGENT_TEMPORARY_RULE:-/etc/sudoers.d/90-temporary-agent}
 CONFIG=${AGENT_TEMPORARY_CONFIG:-/etc/agent-temporary.conf}
 STATE_DIR=${AGENT_TEMPORARY_STATE_DIR:-/var/lib/agent-temporary}
 STATE=${AGENT_TEMPORARY_STATE:-$STATE_DIR/state}
+LOCK=${AGENT_TEMPORARY_LOCK:-$STATE_DIR/.lock}
 SYSTEMD_DIR=${AGENT_TEMPORARY_SYSTEMD_DIR:-/etc/systemd/system}
 SYSTEMCTL=${SYSTEMCTL:-systemctl}
+FLOCK=${FLOCK:-flock}
 OPENRC_DIR=${AGENT_TEMPORARY_OPENRC_DIR:-/etc/init.d}
 RCSERVICE=${RCSERVICE:-}
 RCUPDATE=${RCUPDATE:-}
@@ -105,9 +107,9 @@ effective_unrestricted() {
     done
     [ -n "$true_command" ] || return 1
     if [ "$(id -u)" -eq 0 ]; then
-        su -s /bin/sh "$1" -c "sudo -n $true_command" >/dev/null 2>&1
+        su -s /bin/sh "$1" -c "sudo -k; sudo -n $true_command" >/dev/null 2>&1
     elif [ "$(id -un)" = "$1" ]; then
-        sudo -n "$true_command" >/dev/null 2>&1
+        sudo -k; sudo -n "$true_command" >/dev/null 2>&1
     else
         return 1
     fi
@@ -144,6 +146,20 @@ write_state() {
 }
 
 state_value() { sed -n "s/^$1=//p" "$STATE" | head -n 1; }
+
+lock_trap() { trap release_lock EXIT INT TERM; }
+acquire_lock() {
+    install -d -m 700 "$STATE_DIR"
+    exec 9>"$LOCK" || die "cannot open transaction lock"
+    "$FLOCK" -n 9 2>/dev/null || { exec 9>&-; die "transaction already in progress"; }
+    chmod 600 "$LOCK"; chown root:"$(id -gn root)" "$LOCK"
+    lock_trap
+}
+release_lock() { "$FLOCK" -u 9 2>/dev/null || true; exec 9>&-; trap - EXIT INT TERM; }
+remove_managed() {
+    rm -f "$RULE" "$STATE" || return 1
+    [ ! -e "$RULE" ] && [ ! -e "$STATE" ]
+}
 
 install_units() {
     if [ "${INIT_SYSTEM:-}" = openrc ]; then
@@ -246,7 +262,7 @@ do_on() {
     done
     [ "$persist_reboot" = no ] || [ -n "$ttl_text" ] || die "--persist-reboot requires explicit --ttl DURATION"
     [ -n "$ttl_text" ] || ttl_text=$DEFAULT_TTL
-    ttl_seconds=$(parse_ttl "$ttl_text"); validate_platform; load_user
+    ttl_seconds=$(parse_ttl "$ttl_text"); validate_platform; load_user; acquire_lock
     if [ -f "$STATE" ]; then
         expires=$(state_value expires_at_epoch); now=$(date +%s)
         if [ -n "$expires" ] && [ "$now" -lt "$expires" ] && effective_unrestricted "$AGENT_USER"; then
@@ -258,13 +274,22 @@ do_on() {
             die "already active or inconsistent: run status/off"
         fi
     fi
-    now=$(date +%s); expires=$((now + ttl_seconds)); write_rule; write_state "$now" "$expires" "$ttl_text" "$persist_reboot"
-    if ! service_start agent-temporary-expire >/dev/null 2>&1; then rm -f "$RULE" "$STATE"; die "could not arm local expiry timer; privilege was revoked"; fi
-    validate_sudoers; echo "Temporary agent sudo access enabled for $AGENT_USER until epoch $expires."
+    now=$(date +%s); expires=$((now + ttl_seconds))
+    if ! write_rule; then remove_managed || true; release_lock; die "could not prepare sudoers rule"; fi
+    lock_trap
+    if ! write_state "$now" "$expires" "$ttl_text" "$persist_reboot"; then remove_managed || true; release_lock; die "could not write temporary state"; fi
+    lock_trap
+    if ! service_start agent-temporary-expire >/dev/null 2>&1; then remove_managed || true; die "could not arm local expiry timer; privilege was revoked"; fi
+    validate_sudoers || { remove_managed || true; die "sudoers validation failed; privilege was revoked"; }
+    if ! effective_unrestricted "$AGENT_USER"; then
+        remove_managed || true
+        die "exact authority probe failed; privilege was revoked"
+    fi
+    echo "Temporary agent sudo access enabled for $AGENT_USER until epoch $expires."
 }
 
 do_off() {
-    need_root off; load_user; rm -f "$RULE" "$STATE"
+    need_root off; load_user; acquire_lock; remove_managed || die "could not remove managed authority"
     service_stop agent-temporary-expire
     validate_sudoers
     if effective_unrestricted "$AGENT_USER"; then die "effective temporary privilege remains after revoke"; fi
@@ -272,29 +297,47 @@ do_off() {
 }
 
 do_expire() {
-    need_root internal; [ -f "$STATE" ] || exit 0; expires=$(state_value expires_at_epoch)
-    case "$expires" in ''|*[!0-9]*) rm -f "$RULE" "$STATE"; exit 0 ;; esac
-    [ "$(date +%s)" -ge "$expires" ] || exit 0; rm -f "$RULE"; validate_sudoers
+    need_root internal; acquire_lock
+    [ -f "$STATE" ] || { remove_managed && validate_sudoers || die "expiry cleanup failed"; exit 0; }
+    activated=$(state_value activated_at_epoch); expires=$(state_value expires_at_epoch)
+    case "$activated:$expires" in *[!0-9:]*|:*) remove_managed && validate_sudoers || die "expiry cleanup failed"; exit 0 ;; esac
+    now=$(date +%s)
+    [ "$now" -ge "$activated" ] && [ "$now" -lt "$expires" ] && exit 0
+    AGENT_USER=$(state_value user)
+    remove_managed && validate_sudoers || die "expiry cleanup failed"
+    effective_unrestricted "$AGENT_USER" && die "effective temporary privilege remains after expiry" || true
 }
 
 do_expire_loop() {
     need_root internal
-    while [ -f "$STATE" ]; do
-        expires=$(state_value expires_at_epoch); now=$(date +%s)
-        case "$expires" in ''|*[!0-9]*) rm -f "$RULE" "$STATE"; validate_sudoers; exit 0 ;; esac
-        if [ "$now" -ge "$expires" ]; then rm -f "$RULE"; validate_sudoers; exit 0; fi
+    while :; do
+        acquire_lock
+        [ -f "$STATE" ] || { remove_managed && validate_sudoers || die "expiry cleanup failed"; exit 0; }
+        activated=$(state_value activated_at_epoch); expires=$(state_value expires_at_epoch); now=$(date +%s)
+        case "$activated:$expires" in *[!0-9:]*|:*) remove_managed && validate_sudoers || die "expiry cleanup failed"; exit 0 ;; esac
+        if [ "$now" -lt "$activated" ] || [ "$now" -ge "$expires" ]; then
+            AGENT_USER=$(state_value user)
+            remove_managed && validate_sudoers || die "expiry cleanup failed"
+            effective_unrestricted "$AGENT_USER" && die "effective temporary privilege remains after expiry" || true
+            exit 0
+        fi
+        release_lock
         sleep 1
     done
 }
 
 do_boot_revoke() {
-    need_root internal
-    if [ ! -f "$STATE" ]; then rm -f "$RULE"; validate_sudoers; exit 0; fi
-    load_user; expires=$(state_value expires_at_epoch); now=$(date +%s); persist=$(state_value persist_reboot)
-    case "$expires" in ''|*[!0-9]*) rm -f "$RULE" "$STATE"; validate_sudoers; exit 0 ;; esac
-    if [ "$now" -ge "$expires" ]; then rm -f "$RULE" "$STATE"; service_stop agent-temporary-expire; validate_sudoers; exit 0; fi
-    if [ "$persist" != yes ]; then rm -f "$RULE" "$STATE"; service_stop agent-temporary-expire; validate_sudoers; exit 0; fi
-    if ! effective_unrestricted "$AGENT_USER"; then write_rule; fi
+    need_root internal; acquire_lock
+    if [ ! -f "$STATE" ]; then remove_managed && validate_sudoers || die "boot cleanup failed"; exit 0; fi
+    if [ ! -e "$RULE" ]; then rm -f "$STATE" && validate_sudoers || die "boot cleanup failed"; exit 0; fi
+    load_user; activated=$(state_value activated_at_epoch); expires=$(state_value expires_at_epoch); now=$(date +%s); persist=$(state_value persist_reboot)
+    case "$activated:$expires" in *[!0-9:]*|:*) remove_managed && validate_sudoers || die "boot cleanup failed"; exit 0 ;; esac
+    if [ "$now" -lt "$activated" ] || [ "$now" -ge "$expires" ]; then remove_managed && service_stop agent-temporary-expire && validate_sudoers || die "boot cleanup failed"; exit 0; fi
+    if [ "$persist" != yes ]; then remove_managed && service_stop agent-temporary-expire && validate_sudoers || die "boot cleanup failed"; exit 0; fi
+    if ! effective_unrestricted "$AGENT_USER"; then
+        if ! write_rule; then remove_managed && validate_sudoers || true; return 1; fi
+        lock_trap
+    fi
     service_start agent-temporary-expire >/dev/null
     validate_sudoers
 }
@@ -339,6 +382,7 @@ fi
 
 case "${1:-status}" in
     help|--help|-h) [ "$#" -eq 1 ] || usage; public_help ;;
+    install) [ "$#" -eq 1 ] || usage; do_install ;;
     on) shift; do_on "$@" ;; off) do_off ;; status)
         shift; STATUS_JSON=no
         if [ "$#" -eq 1 ] && [ "$1" = --json ]; then STATUS_JSON=yes
@@ -350,7 +394,7 @@ case "${1:-status}" in
                 END { print "}" }'
         else do_status
         fi ;;
-    version) version ;;
+    version|--version) [ "$#" -eq 1 ] || usage; version ;;
     --validate-ttl) [ "$#" -eq 2 ] || usage; parse_ttl "$2" >/dev/null; echo valid ;;
     --internal-expire) do_expire ;; --internal-expire-loop) do_expire_loop ;; --internal-boot-revoke) do_boot_revoke ;; *) usage ;;
 esac

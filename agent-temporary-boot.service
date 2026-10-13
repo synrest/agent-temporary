@@ -2,6 +2,7 @@
 Description=Revoke agent-temporary privilege after boot
 After=local-fs.target
 Before=sshd.service
+Before=agent-temporary-expire.service
 
 [Service]
 Type=oneshot
